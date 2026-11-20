@@ -36,7 +36,7 @@ The gate changed several times on the last day. From late morning until 19:00 ET
 Run the commands from the repository root. `$W` is one work directory; every later step and `slurm/repro.sbatch` expect this layout in it. The pinned source is Blender tag v5.3.0, commit `02f0899d78e374b63e7181d9061e1f7ab03419cc`.
 
 ```bash
-scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/
+scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/ bakes_hq/
 scripts/build_host.sh $W/blender $W/host      # Blender + patches/host.diff -> host/install
 scripts/build_engine.sh $W/engine             # tiny-cuda-nn + nrc/ -> engine/libcycles_nrc.so
 
@@ -112,9 +112,53 @@ The cache maps a surface point and direction to outgoing radiance. Under rule c0
 
 The bakes are public: Hugging Face `wchai/cycles-h100-nrc-bake`, `nrc_bakehi/<scene>_t24/bake_c0.nrc`. `configs/bakes.sha256` holds their hashes.
 
-The bake has its own build: the exact configuration's kernel flags plus `-DCYCLES_NRC` on the tree of `patches/bake/kernel.diff`, built with `FLAGS=exact_nvcc_flags.txt EXTRA=-DCYCLES_NRC scripts/build_cubins.sh`, and a host with the training hooks, `patches/bake/host.diff`. Built from this repository, the bake cubins are byte-identical to the project's (`configs/bake_cubins.sha256`), and the public bakes match the files the 48,641 run loaded (`configs/bakes.sha256`). The bake scripts are in `nrc/bake/`; no bake has been re-run from them.
+The bake has its own build: the exact configuration's kernel flags plus `-DCYCLES_NRC` on the tree of `patches/bake/kernel.diff`, built with `FLAGS=exact_nvcc_flags.txt EXTRA=-DCYCLES_NRC scripts/build_cubins.sh`, and a host with the training hooks, `patches/bake/host.diff`. Built from this repository, the bake cubins are byte-identical to the project's (`configs/bake_cubins.sha256`), and the public bakes match the files the 48,641 run loaded (`configs/bakes.sha256`). The online bake scripts are in `nrc/bake/`; no online bake has been re-run from them.
 
-Why the cache passes now and failed before: its error is a smooth bias, the monster body 10-15% low and the walls 5-10% high, not noise. More capacity does not remove it: a 32x larger hash table and a 128-wide MLP left the bias in place, and the 128-wide network cost 15-35% more time on the unfused path. On held-out cache error ReLU beat SiLU at every width. The FLIP rule caught the bias; the 32-spp PSNR gate does not, because an exact 32-spp render is far noisier than the bias.
+Why the cache passes now and failed before: its error is a smooth bias, the monster body 10-15% low and the walls 5-10% high, not noise. The FLIP rule caught the bias; the 32-spp PSNR gate does not, because an exact 32-spp render is far noisier than the bias. The bias comes from the order of the training data: the online bake takes each step's batch from one engine call of one render. The ablation below shows it. In the online bake, a 32x larger hash table and a 128-wide MLP left the bias in place, the 128-wide network cost 15-35% more time on the unfused path, and ReLU beat SiLU on held-out cache error at every width.
+
+### nrc-hq: the same cache, baked offline
+
+`nrc-hq` is the `nrc` configuration with a second set of caches: the same model, engine, cubins and host, run with `BAKES=$W/bakes_hq`. The caches are on Hugging Face, `wchai/cycles-h100-nrc-bake`, `nrc_hq/<scene>_t24/bake_c0.nrc`; `configs/bakes_hq.sha256` holds their hashes, and `scripts/fetch.sh` fetches both sets.
+
+`nrc/bake/dump.sh` renders the 9 exact renders of the production bake again (seeds 61-69, 2048 spp, 25% of the paths train) and writes the training records of every engine call to disk: about 5.9, 11.1 and 17.7 billion records, 240, 455 and 725 GB, for monster, junkshop and classroom. `nrc/bake/stream/bake_stream.py` then trains on them in PyTorch, and `nrc/bake/calibrate.sh` fits the scale as for any bake.
+
+| | |
+|---|---|
+| model | as `nrc`: t24 hash grid, 64 wide, 5 hidden layers, ReLU |
+| data | every record used once; batches of 2^18 records drawn from a shuffled buffer of 2^25 records that mixes all 9 renders |
+| optimizer | Adam, lr 3e-3 to 1e-4, cosine after a 2% warm-up; beta2 0.999 for the first 10% of steps, then 0.9999; L2 loss; MLP in bf16 |
+| weights | exponential moving average, decay 0.99 to 0.9999 over 80% of the steps; the average is exported |
+| training time | 275, 511 and 822 s on one H100; the dump renders are not included |
+| calibration | c0 scales 1.06, 1.02 and 1.13 (`nrc`: 1.11, 1.08 and 1.24) |
+
+Results on one H100 SXM:
+
+| | monster | junkshop | classroom | total |
+|---|---|---|---|---|
+| samples per minute, `nrc-hq` | 20,377 | 13,434 | 15,187 | 48,997 |
+| samples per minute, `nrc` | 20,275 | 13,319 | 15,047 | 48,641 |
+| gate PSNR, `nrc-hq` | 36.17 dB | 32.00 dB | 35.63 dB | |
+| gate luminance, `nrc-hq` | -0.14% | +0.30% | -0.10% | |
+| gate PSNR, `nrc` | 33.05 dB | 23.80 dB | 32.31 dB | |
+| images per second at the 32-spp bar, `nrc-hq` | 12.7, 20 spp | 5.32, 32 spp | 6.80, 24 spp | 24.8 |
+| images per second at the 32-spp bar, `nrc` | 13.5, 20 spp | 7.52, 20 spp | 7.58, 24 spp | 28.6 |
+
+Samples per minute are medians of six official measurements, each configuration on its own 8-GPU node. The model and the engine are the same, so the 0.7% difference is node spread. `nrc-hq` passes the gate on all three scenes, 8.4 times stock Blender in images per second at the bar against 9.7 for `nrc`. It is better than `nrc` above about 256 samples and worse at the 32-spp bar, mainly on junkshop. At 1,024 samples it reaches 35.3, 31.2 and 35.1 dB, against 32.8, 23.7 and 32.1 dB for `nrc`, and gets there 1.3, 1.1 and 1.8 times sooner than `exact` (README figure).
+
+The public trainer reproduces the published caches. Baked again from the same dumps with `bake_stream.py` as committed, then calibrated, the caches score 35.14, 32.21 and 36.24 dB on the gate and pass all three scenes; the calibration scales are 1.08, 1.03 and 1.13. These are single runs; the published caches score 36.17, 32.00 and 35.63 dB.
+
+Why the production cache is biased: an ablation on the same dumps, all with the 64x5 ReLU model, gate PSNR.
+
+| training | monster | junkshop | classroom |
+|---|---|---|---|
+| production tcnn bake: online, 5 stages, each step's batch from one engine call of one render | 33.05 dB | 23.80 dB | 32.31 dB |
+| the production 5-stage schedule in PyTorch, records shuffled across calls and renders | 36.38 dB | 31.21 dB | 37.34 dB |
+| the same, each batch from one engine call in render order, as in the online bake | 33.71 dB | 25.81 dB | 33.26 dB |
+| the same, plus tcnn's MLP l2_reg 1e-6, fp16 grid gradients and sparse grid Adam | 33.49 dB | 26.62 dB | 30.76 dB |
+
+With the same schedule and model, shuffling the records gives 2.7, 5.4 and 4.1 dB over batches drawn one engine call at a time, and the call-ordered PyTorch bake lands 0.7, 2.0 and 1.0 dB above production. tcnn's three optimizer details move it by -2.5 to +0.8 dB and do not close the gap. So the gap comes from the order of the training data. It does not come from the schedule, the optimizer details or capacity.
+
+At low sample counts the effect reverses on junkshop. At 32 spp the call-ordered caches score 20.6 to 21.7 dB, the shuffled one 18.0 dB and production 21.0 dB. The reason is not known.
 
 ## 6. Reproduce
 
@@ -193,7 +237,7 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 | single-closure NEE | no gain | MIS still needs every closure's pdf |
 | path drains, host gaps, bookkeeping | 94-96% of the timed render is already integrator kernels | no scheduling-only route |
 | online neural cache, trained during the render | fails FLIP unless it ends very few paths | smooth local bias of 1.4-2.6% RMS at a 9-px scale |
-| wider MLP for the baked cache | no image gain, 15-35% slower on the unfused path | the bias is not a capacity problem |
+| wider MLP for the online bake | no image gain, 15-35% slower on the unfused path | the bias comes from the order of the training data, not capacity (section 5) |
 | smaller bakes | t22 -0.56% | t24 stays |
 | Russian roulette exponent 2 | fails the image rule on monster and classroom | |
 | Sobol cap tuned on seed pair 0/1 | +1.5%, fails 8 of 9 other seed pairs | the FLIP drop at seeds 0/1 was chance |

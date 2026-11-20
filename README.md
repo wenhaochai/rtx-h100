@@ -18,14 +18,16 @@ Exact per-scene kernel specialization gives the first 2.0 times. A per-scene bak
 | RTX 5090, OptiX, Open Data median | | | | 19,202 | reference |
 | `exact`: specialized kernels, no approximation | 6,706 | 4,050 | 3,356 | 14,106 | equal to stock up to floating-point rounding |
 | **`nrc`: + baked neural radiance cache** | **20,275** | **13,319** | **15,047** | **48,641** | approximate, passes the image gate |
+| `nrc-hq`: `nrc` with the offline-baked caches | 20,377 | 13,434 | 15,187 | 48,997 | approximate, passes the image gate |
 
-One H100 SXM 80 GB, official benchmark protocol. Per-scene values are medians over 6 to 12 three-scene runs; totals are as the project reported them, so they can differ from the column sum by a few units. Rebuilt and re-measured from this repository, `nrc` scores 48,721 and passes the same gate, and `exact` scores 14,116 with the same image difference.
+One H100 SXM 80 GB, official benchmark protocol. Per-scene values are medians over 6 to 12 three-scene runs; totals are as the project reported them, so they can differ from the column sum by a few units. Rebuilt and re-measured from this repository, `nrc` scores 48,721 and passes the same gate, and `exact` scores 14,116 with the same image difference. `nrc-hq` runs the same model, engine and cubins with caches baked offline from the same exact renders; it was measured on another node, so its difference from `nrc` is node spread. Its gate PSNR is 36.17, 32.00 and 35.63 dB, against 33.05, 23.80 and 32.31 dB for `nrc`.
 
 | images per second at the 32-spp bar | monster | junkshop | classroom | total | vs stock |
 |---|---|---|---|---|---|
 | stock Blender 5.3.0, 32 spp | 1.27 | 1.01 | 0.67 | 2.95 | 1.0x |
 | `exact`, 32 spp | 2.68 | 1.57 | 1.07 | 5.32 | 1.8x |
 | **`nrc`, 20 / 20 / 24 spp** | **13.5** | **7.52** | **7.58** | **28.6** | **9.7x** |
+| `nrc-hq`, 20 / 32 / 24 spp | 12.7 | 5.32 | 6.80 | 24.8 | 8.4x |
 
 A sample of `nrc` does less work than a sample of stock Blender, so this table counts images instead: how many images per second reach the PSNR of an exact 32-spp render against the 65,536-spp reference, the gate's bar. Each value is one over the median render time of three seed-0 renders at the fewest samples that clear the bar, without scene load; `nrc`'s mean luminance at those counts is off by 2 to 8%.
 
@@ -43,11 +45,13 @@ A sample of `nrc` does less work than a sample of stock Blender, so this table c
 
 ## Samples per minute and image quality
 
-![PSNR against render time for nrc, exact and stock Blender on the three scenes](assets/quality_time.png)
+![PSNR against render time for four nrc caches, exact and stock Blender on the three scenes](assets/quality_time.png)
 
-<sub>Seed-0 renders on one H100. PSNR against the 65,536-spp exact reference; render time without scene load. Stock Blender's time is the exact build's, scaled by the ratio of their samples per minute. The grey line is the gate's PSNR bar, an exact 32-sample render; the ring is the 4,096-sample image that passed the gate, its time taken from the benchmark's samples per minute.</sub>
+<sub>Seed-0 renders on one H100, PSNR against the 65,536-spp exact reference. The cache lines have points at 16, 64, 256 and 1,024 samples; `exact` at 32 to 512. `nrc` is the production cache, `nrc-hq` the offline-baked one. 128×6 SiLU and 256×6 SiLU are caches with wider MLPs; they ran on an experimental wide-MLP inference engine that is not in this repository. Render time is Cycles' render time without scene load, the median of three renders for every cache point and one render for `exact`. Stock Blender's time is the exact build's, scaled by the ratio of their samples per minute.</sub>
 
 The benchmark counts samples, and a cached sample does far less work than an exact one, so samples per minute overstate how fast a usable image appears. Measured as image quality against render time, `nrc` clears the PSNR bar at 20 to 24 samples, in 0.07 to 0.13 s: 4.8 to 7.1 times sooner than the exact build and 7.4 to 11.4 times sooner than stock Blender, which reach the bar at 32 samples. Its bias caps the quality near 33, 24 and 32 dB, so beyond about 1,000 samples the exact build gets there first and keeps improving; the benchmark score and the gate images both sit in that region. At those sample counts its mean luminance is off by 2 to 8%, past the gate's 0.5% limit, and the 9 to 18 minutes of baking per scene are not counted.
+
+`nrc-hq` lifts that ceiling. At 1,024 samples it reaches 35.3, 31.2 and 35.1 dB, against 32.8, 23.7 and 32.1 dB for `nrc`, and it still gets there 1.3, 1.1 and 1.8 times sooner than the exact build. At 256 samples it is 3.3, 2.5 and 4.9 times sooner. At the 32-sample bar it is slower than `nrc`, mainly on junkshop, which needs 32 samples instead of 20; the three scenes give 24.8 images per second against 28.6. The wider SiLU caches add up to 1.45 dB at 1,024 samples and cost up to 1.7 times the render time.
 
 ## Reproduce
 
@@ -64,6 +68,8 @@ export BENCH=$W/bench/blender-benchmark-launcher BLENDER=$W/host/install
 export CUBINS=$W/nrc_cubins ENGINE=$W/engine/libcycles_nrc.so BAKES=$W/bakes
 CUDA_VISIBLE_DEVICES=0 scripts/run.sh nrc bench out/nrc_1
 ```
+
+For `nrc-hq`, run the same commands with `BAKES=$W/bakes_hq`.
 
 The `exact` configuration, the image gate, the exactness check and the Slurm job are in [RECIPE.md](RECIPE.md), sections 3 and 6.
 
