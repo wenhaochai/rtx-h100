@@ -36,7 +36,7 @@ The gate changed several times on the last day. From late morning until 19:00 ET
 Run the commands from the repository root. `$W` is one work directory; every later step and `slurm/repro.sbatch` expect this layout in it. The pinned source is Blender tag v5.3.0, commit `02f0899d78e374b63e7181d9061e1f7ab03419cc`.
 
 ```bash
-scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/ bakes_hq/
+scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/ bakes_hq/ bakes_permuto/
 scripts/build_host.sh $W/blender $W/host      # Blender + patches/host.diff -> host/install
 scripts/build_engine.sh $W/engine             # tiny-cuda-nn + nrc/ -> engine/libcycles_nrc.so
 
@@ -118,7 +118,7 @@ Why the cache passes now and failed before: its error is a smooth bias, the mons
 
 ### nrc-hq: the same cache, baked offline
 
-`nrc-hq` is the `nrc` configuration with a second set of caches: the same model, engine, cubins and host, run with `BAKES=$W/bakes_hq`. The caches are on Hugging Face, `wchai/cycles-h100-nrc-bake`, `nrc_hq/<scene>_t24/bake_c0.nrc`; `configs/bakes_hq.sha256` holds their hashes, and `scripts/fetch.sh` fetches both sets.
+`nrc-hq` is the `nrc` configuration with a second set of caches: the same model, engine, cubins and host, run with `BAKES=$W/bakes_hq`. The caches are on Hugging Face, `wchai/cycles-h100-nrc-bake`, `nrc_hq/<scene>_t24/bake_c0.nrc`; `configs/bakes_hq.sha256` holds their hashes, and `scripts/fetch.sh` fetches them with the other sets.
 
 `nrc/bake/dump.sh` renders the 9 exact renders of the production bake again (seeds 61-69, 2048 spp, 25% of the paths train) and writes the training records of every engine call to disk: about 5.9, 11.1 and 17.7 billion records, 240, 455 and 725 GB, for monster, junkshop and classroom. `nrc/bake/stream/bake_stream.py` then trains on them in PyTorch, and `nrc/bake/calibrate.sh` fits the scale as for any bake.
 
@@ -160,6 +160,60 @@ With the same schedule and model, shuffling the records gives 2.7, 5.4 and 4.1 d
 
 At low sample counts the effect reverses on junkshop. At 32 spp the call-ordered caches score 20.6 to 21.7 dB, the shuffled one 18.0 dB and production 21.0 dB. The reason is not known.
 
+### nrc-permuto: the outgoing direction inside the grid
+
+`nrc-permuto` replaces the hash grid on position by a permutohedral lattice grid on position and outgoing direction. It runs the `nrc` host and cubins with engine `infer` of the same library: `NRC_CONFIG=nrc/configs/run_infer.json BAKES=$W/bakes_permuto`. The caches are on Hugging Face, `wchai/cycles-h100-nrc-bake`, `nrc_permuto/<scene>_t24/bake_c0.nrc`; `configs/bakes_permuto.sha256` holds their hashes.
+
+A permutohedral lattice tiles d-dimensional space with simplices, so a point is interpolated from the d + 1 vertices of its simplex instead of the 2^d corners of a cube. A grid encoding on it reads d + 1 table rows per level, 6 in five dimensions against 32 for a cubic grid, so a grid over position and direction stays affordable.
+
+| | |
+|---|---|
+| encoding | permutohedral lattice on position and outgoing direction: 5 levels x 8 features, 2^23 entries per level, resolution 128 to 2048 on position and 4 to 64 on direction; one-blob on normal and roughness, identity on the albedos; 58 inputs padded with ones to 64 |
+| model, data, optimizer | as `nrc-hq`: 64 wide, 5 hidden layers, ReLU; every record used once; the same schedule and weight average |
+| training | `bake_stream.py --enc permuto5`: 208, 391 and 639 s on one H100, 0.76 times the hash grid's 275, 514 and 852 s; the table gradient is one fp32 vector atomic per lattice vertex |
+| calibration | c0 scales 1.05, 1.00 and 1.11, folded into the output layer (`set_scale.py`) |
+| cost | 0.67 GB per scene |
+| inference | engine `infer`, fp16 wgmma: 0.82 ns per query against 0.72 ns for the hash grid, on 2^20 monster queries in render order; the lattice pass is 78% of it |
+
+Why the direction belongs in the grid: in the hash cache the direction enters only through 4 one-blob bins per angle, so one small MLP must model how the radiance of every surface point changes with direction. In the lattice each region of position and direction has its own features. With the same trainer and the same records, the held-out cell-scale relative error falls from 0.0059, 0.0024 and 0.0094 for the hash grid to 0.0018, 0.0006 and 0.0063. A lattice on position alone is no better than the hash grid: on monster after 2 billion records it reaches 0.013 to 0.025 against 0.016 to 0.020. So the gain comes from the direction, not from the lattice.
+
+Results on one H100 SXM:
+
+| | monster | junkshop | classroom | total |
+|---|---|---|---|---|
+| samples per minute, `nrc-permuto` | 19,087 | 13,318 | 13,979 | 46,385 |
+| samples per minute, `nrc-hq` | 20,377 | 13,434 | 15,187 | 48,997 |
+| gate PSNR, `nrc-permuto` | 38.30 dB | 34.24 dB | 38.09 dB | |
+| gate luminance, `nrc-permuto` | -0.12% | +0.30% | -0.10% | |
+| gate PSNR, `nrc-hq` | 36.17 dB | 32.00 dB | 35.63 dB | |
+| 1,024 samples, `nrc-permuto` | 37.0 dB | 32.6 dB | 37.1 dB | |
+| 1,024 samples, `nrc-hq` | 35.3 dB | 31.2 dB | 35.1 dB | |
+| images per second at the 32-spp bar, `nrc-permuto` | 8.75, 24 spp | 3.61, 40 spp | 6.48, 24 spp | 18.8 |
+| images per second at the 32-spp bar, `nrc-hq` | 12.7, 20 spp | 5.32, 32 spp | 6.80, 24 spp | 24.8 |
+
+Samples per minute are medians of six official measurements on one 8-GPU node (`slurm/repro.sbatch <repo> $W nrc-permuto`); the `nrc-hq` row is from another node. The other rows are seed-0 renders, three per point, with the median render time. `nrc-permuto` passes the gate on all three scenes, 2.1 to 2.5 dB above `nrc-hq`, and is above `nrc-hq` at every sample count from 256 up. At 1,024 samples it matches or beats the 256×6 SiLU cache in 0.6 to 0.7 times its render time, and it is 1.4 times sooner than `exact` on junkshop; on monster and classroom it is above `exact` at 512 samples, which takes 4.45 and 9.47 s against 3.05 and 4.47 s.
+
+It costs 5.3% of the samples per minute against `nrc-hq`, and it is slower at the 32-spp bar: 6.4 times stock Blender in images per second, against 8.4 for `nrc-hq` and 9.7 for `nrc`. On junkshop it needs 40 samples to reach the bar, against 32 for `nrc-hq` and 20 for `nrc`. Renders this short carry stalls of 0.1 to 0.5 s in some repeats: the fastest of the three renders gives 10.7, 4.16 and 6.68 images per second, 21.6 in total.
+
+The reason is variance, not bias. Over 8 seeds at 32 spp, with the gate's display mapping, per-pixel error splits into squared bias and variance. These renders used monster and junkshop cubins that read the seed; the `nrc` cubins fold it to 0.
+
+| scene | configuration | PSNR per image | bias² | variance |
+|---|---|---|---|---|
+| junkshop | `exact` | 18.84 dB | 0.0017 | 0.0114 |
+| junkshop | `nrc` | 20.45 dB | 0.0048 | 0.0042 |
+| junkshop | `nrc-hq` | 19.45 dB | 0.0021 | 0.0093 |
+| junkshop | `nrc-permuto` | 18.37 dB | 0.0029 | 0.0116 |
+| monster | `exact` | 24.25 dB | 0.00031 | 0.0034 |
+| monster | `nrc` | 26.02 dB | 0.00073 | 0.0018 |
+| monster | `nrc-hq` | 25.80 dB | 0.00052 | 0.0021 |
+| monster | `nrc-permuto` | 25.79 dB | 0.00043 | 0.0022 |
+
+A cache ends each path at its first hit, so the samples of one pixel differ only in where they land inside it. A blurry cache returns nearly the same value for all of them: `nrc` has 2.7 times less variance than `exact` on junkshop, and its bias is the largest. An accurate cache keeps the detail inside the pixel, such as the brick wall on junkshop, so its variance stays at the exact level, and at 32 spp variance dominates. Caches that cannot see the normal and the albedos have the same variance on all three scenes, so this detail is stored by position, not passed in through those inputs. At high sample counts the variance averages out and the smaller bias wins.
+
+The public trainer reproduces the monster cache. Baked again with `bake_stream.py --enc permuto5` from the same dumps in 207 s and folded with the published scale, it scores 38.38 dB and -0.23% on the gate, against 38.30 dB and -0.12%; its outputs differ from the published cache's by 8% relative L2 on 2^20 queries, the spread between two trainings. Junkshop and classroom were not baked again.
+
+The new library runs `nrc` as before. On one node, three official measurements each, the previous library scored 49,342 and the new one 49,339 samples per minute; the gate returns the same PSNR and luminance; on 2^20 queries through the `.so`, the outputs of the three hash caches are bit-identical, and so are the outputs of the three permuto caches against the experimental engine that first ran them. The `nrc` gate images differ from the previous library's by a relative L2 of 4e-8 to 5e-6, as two renders with the same library do.
+
 ## 6. Reproduce
 
 ```bash
@@ -170,6 +224,8 @@ CUDA_VISIBLE_DEVICES=0 scripts/run.sh nrc check out/nrc          # 4096-spp gate
 scripts/make_reference.sh $W/blender-5.3.0-linux-x64 ref 0    # reference + bar, ~2 GPU-h
 python3 scripts/gate.py ref out/nrc
 ```
+
+For `nrc-hq`, set `BAKES=$W/bakes_hq`. For `nrc-permuto`, set `BAKES=$W/bakes_permuto NRC_CONFIG=nrc/configs/run_infer.json`; from this repository it scores 46,384.6 (19,087.0, 13,318.4 and 13,979.2) and returns the gate of section 5 exactly.
 
 The `exact` configuration needs no engine, bake or reference. Its check is the image difference against the official binary, measured against the seed-to-seed noise floor:
 
@@ -183,7 +239,7 @@ BLENDER=$STOCK CUDA_VISIBLE_DEVICES=0 SEED=1 scripts/run.sh stock check out/stoc
 python3 scripts/identity.py out/stock0 out/stock1 out/exact     # project: ratios 1.4e-3 to 2.8e-3
 ```
 
-On Slurm, `sbatch slurm/repro.sbatch <repo> $W [nrc|exact]` runs six measurements and the check images of one configuration on one 8-GPU node and writes them to `$W/runs/<job id>`.
+On Slurm, `sbatch slurm/repro.sbatch <repo> $W [nrc|nrc-permuto|exact]` runs six measurements and the check images of one configuration on one 8-GPU node and writes them to `$W/runs/<job id>`.
 
 Reproduction from this repository, with the host, the cubins and the engine built by the scripts above and the public bakes:
 
