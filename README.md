@@ -10,6 +10,15 @@
 
 Exact per-scene kernel specialization gives the first 2.0 times. A per-scene baked neural radiance cache that ends every path at its first hit gives most of the rest. The first release, `nrc` at 48,641, asked the cache for the light arriving along one sampled bounce direction. `nrc-scatter` asks it for the light the first hit scatters toward the camera, so no bounce is sampled, and trains it on targets that average eight samples at the same hit; that gives 13% more samples per minute and cuts the noise the cache adds. It passes the 32-spp image gate on all three scenes. Wide BVHs, kernel concurrency and online cache training gave nothing. At the quality of an exact 32-spp render, `nrc-scatter` delivers 13.7 times as many images per second as stock Blender at seed 0, against 9.7 for `nrc`; at those low sample counts its mean brightness is off by up to 16%, from a sampling setting all cache configurations share.
 
+## News
+
+- **2026-11-21** `nrc-scatter`: the cache answers the light the first hit scatters toward the camera and learns it from targets that average eight samples at that hit. 55,148 samples per minute, up from 48,641; 40.4 images per second at the 32-spp bar, up from 28.6. [#5](https://github.com/wenhaochai/rtx-h100/pull/5)
+- **2026-11-21** Negative result: sampling K bounces and querying the cache K times per ending path cuts the cache's noise but costs more than it saves at the bar. [#4](https://github.com/wenhaochai/rtx-h100/pull/4)
+- **2026-11-20** Negative result: the scattered query trained on one-sample targets shows where the low-sample noise comes from, but its caches are biased. [#3](https://github.com/wenhaochai/rtx-h100/pull/3)
+- **2026-11-20** `nrc-permuto`: a permutohedral lattice cache over position and direction. Higher PSNR at high sample counts, slower at the bar. [#2](https://github.com/wenhaochai/rtx-h100/pull/2)
+- **2026-11-20** `nrc-hq`: offline-baked caches, the trainer, and the cause of the cache bias. [#1](https://github.com/wenhaochai/rtx-h100/pull/1)
+- **2026-11-20** First release: `nrc` at 48,641 samples per minute.
+
 ## Results
 
 | samples per minute | monster | junkshop | classroom | total | image |
