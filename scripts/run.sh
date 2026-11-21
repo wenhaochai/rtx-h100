@@ -15,6 +15,7 @@
 #   BLENDER  install dir of build_host.sh (nrc, exact) or the official binary's dir (stock)
 #   CUBINS   dir with <scene>.cubin from build_cubins.sh, built for the same configuration (nrc, exact)
 #   ENGINE   libcycles_nrc.so (build_engine.sh)     BAKES   dir with <scene>/bake_c0.nrc (fetch.sh)     (nrc only)
+#   NRC_CONFIG  engine config (default nrc/configs/run_wgmma.json); nrc-permuto: nrc/configs/run_infer.json, BAKES=$W/bakes_permuto
 set -euo pipefail
 CFG=${1:?nrc|exact|stock}; MODE=${2:?bench|check}; OUT=${3:?out dir}; shift 3
 SCENES=("$@"); [ ${#SCENES[@]} = 0 ] && SCENES=(monster junkshop classroom)
@@ -33,7 +34,7 @@ export TMPDIR=${TMPDIR:-$OUT/tmp}; mkdir -p "$TMPDIR"; export XDG_CACHE_HOME=$TM
 # global settings
 [ -z "$G" ] || while read -r kv; do [ -n "$kv" ] && export "$kv"; done < "$C/$G"
 if [ "$CFG" = nrc ]; then
-  export CYCLES_NRC_ENGINE=$ENGINE CYCLES_NRC_CONFIG=$HERE/nrc/configs/run_wgmma.json
+  export CYCLES_NRC_ENGINE=$ENGINE CYCLES_NRC_CONFIG=${NRC_CONFIG:-$HERE/nrc/configs/run_wgmma.json}
   export PRE_PY="exec(open('$C/scene_settings.py').read())"
 fi
 # per-scene settings: SCENE_ENV="<scene>:K=V,K=V;..." (read by direct_bench.py; set here for the check render)

@@ -1,10 +1,11 @@
 #!/bin/bash
-# fetch.sh <dir>   (needs internet; ~7.7 GB)
+# fetch.sh <dir>   (needs internet; ~9.7 GB)
 # 1. Blender source at the pinned v5.3.0 commit with its Linux libraries (lib/linux_x64, git LFS) -> <dir>/blender
 # 2. The official 5.3.0 Linux binary (the stock baseline)                                         -> <dir>/blender-5.3.0-linux-x64
 # 3. Open Data benchmark launcher 3.3.0, its Blender 5.3.0 scenes and benchmark script             -> <dir>/bench
 # 4. The baked neural radiance caches (t24, rule c0) from Hugging Face                             -> <dir>/bakes/<scene>/bake_c0.nrc
 #    and the nrc-hq caches (same model, baked offline by nrc/bake/stream/bake_stream.py)           -> <dir>/bakes_hq/<scene>/bake_c0.nrc
+#    and the nrc-permuto caches (permutohedral lattice grid, bake_stream.py --enc permuto5)        -> <dir>/bakes_permuto/<scene>/bake_c0.nrc
 set -euo pipefail
 D=${1:?dir}; mkdir -p "$D"; D=$(cd "$D" && pwd)
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -38,4 +39,10 @@ for s in monster junkshop classroom; do
   curl -fsSL -o "$D/bakes_hq/$f" "https://huggingface.co/wchai/cycles-h100-nrc-bake/resolve/main/nrc_hq/${s}_t24/bake_c0.nrc"
 done
 (cd "$D/bakes_hq" && sha256sum -c "$HERE/configs/bakes_hq.sha256")
-echo "BENCH=$D/bench/blender-benchmark-launcher  BAKES=$D/bakes  BAKES_HQ=$D/bakes_hq  stock=$D/blender-5.3.0-linux-x64/blender"
+for s in monster junkshop classroom; do
+  f=$s/bake_c0.nrc; mkdir -p "$D/bakes_permuto/$s"
+  (cd "$D/bakes_permuto" && grep " $f\$" "$HERE/configs/bakes_permuto.sha256" | sha256sum -c --status 2>/dev/null) && continue   # present and intact
+  curl -fsSL -o "$D/bakes_permuto/$f" "https://huggingface.co/wchai/cycles-h100-nrc-bake/resolve/main/nrc_permuto/${s}_t24/bake_c0.nrc"
+done
+(cd "$D/bakes_permuto" && sha256sum -c "$HERE/configs/bakes_permuto.sha256")
+echo "BENCH=$D/bench/blender-benchmark-launcher  BAKES=$D/bakes  BAKES_HQ=$D/bakes_hq  BAKES_PERMUTO=$D/bakes_permuto  stock=$D/blender-5.3.0-linux-x64/blender"

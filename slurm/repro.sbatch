@@ -7,11 +7,12 @@
 # One configuration on one 8-GPU H100 node: GPUs 0-5 run one official three-scene measurement each (n = 6),
 # GPUs 6-7 render the check images. Score = sum over scenes of the per-scene median.
 # The project ran on 96-core nodes; with fewer cores the eight Blender processes share them and the timing changes.
-#   sbatch slurm/repro.sbatch <repo> <work dir> [nrc|exact]
-# <work dir> has the layout of RECIPE.md section 3: host/install, bench/, and for nrc nrc_cubins/ engine/ bakes/,
+#   sbatch slurm/repro.sbatch <repo> <work dir> [nrc|nrc-permuto|exact]
+# <work dir> has the layout of RECIPE.md section 3: host/install, bench/, and for nrc nrc_cubins/ engine/ bakes/
+# (nrc-permuto: bakes_permuto/),
 # for exact exact_cubins/ and blender-5.3.0-linux-x64/ (the official binary renders the stock seed-0 and seed-1 images).
 # Results: <work dir>/runs/<job id>/. Then, on CPU:
-#   nrc:   python3 scripts/gate.py <ref dir> <run>/check
+#   nrc, nrc-permuto: python3 scripts/gate.py <ref dir> <run>/check
 #   exact: python3 scripts/identity.py <run>/stock_s0 <run>/stock_s1 <run>/check
 set -uo pipefail
 REPO=${1:?repo}; W=${2:?work dir}; CFG=${3:-nrc}
@@ -21,6 +22,8 @@ export TMPDIR=$W/tmp/$JID; mkdir -p "$TMPDIR"; trap 'rm -rf "$TMPDIR"' EXIT   # 
 export BLENDER=$W/host/install BENCH=$W/bench/blender-benchmark-launcher
 case $CFG in
   nrc)   export CUBINS=$W/nrc_cubins ENGINE=$W/engine/libcycles_nrc.so BAKES=$W/bakes; NIMG=3 ;;
+  nrc-permuto) export CUBINS=$W/nrc_cubins ENGINE=$W/engine/libcycles_nrc.so BAKES=$W/bakes_permuto \
+         NRC_CONFIG=$REPO/nrc/configs/run_infer.json; NIMG=3; CFG=nrc ;;
   exact) export CUBINS=$W/exact_cubins; NIMG=9 ;;
   *) echo "unknown configuration $CFG"; exit 1 ;;
 esac
