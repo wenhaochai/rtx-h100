@@ -12,6 +12,7 @@ Exact per-scene kernel specialization gives the first 2.0 times. A per-scene bak
 
 ## News
 
+- **2026-11-21** RTX PRO 6000 support: the `exact` and `nrc` configurations ported to the RTX PRO 6000 Blackwell (sm_120) and tuned there, plus an OptiX route on its RT cores. `nrc` at 78,297 samples per minute with OptiX and 74,847 with CUDA; `exact` at 19,942 with CUDA, 25,864 with OptiX. [#7](https://github.com/wenhaochai/rtx-h100/pull/7)
 - **2026-11-21** `nrc-scatter`: the cache answers the light the first hit scatters toward the camera and learns it from targets that average eight samples at that hit. 55,148 samples per minute, up from 48,641; 40.4 images per second at the 32-spp bar, up from 28.6. [#5](https://github.com/wenhaochai/rtx-h100/pull/5)
 - **2026-11-21** Negative result: sampling K bounces and querying the cache K times per ending path cuts the cache's noise but costs more than it saves at the bar. [#4](https://github.com/wenhaochai/rtx-h100/pull/4)
 - **2026-11-20** Negative result: the scattered query trained on one-sample targets shows where the low-sample noise comes from, but its caches are biased. [#3](https://github.com/wenhaochai/rtx-h100/pull/3)
@@ -71,6 +72,21 @@ The benchmark counts samples, and a cached sample does far less work than an exa
 
 `nrc-scatter` has the highest PSNR of the four caches at every sample count. At 1,024 samples it reaches 39.2, 35.7 and 42.0 dB, 2.2, 3.1 and 4.8 dB above `nrc-permuto`. At 256 samples it reaches 35.8, 32.1 and 36.5 dB in 0.64 to 0.99 s; `exact` needs 512 samples and 4.5 to 9.5 s for 36.3, 33.4 and 36.2 dB. Its 32-sample noise is 1.4 to 6.1 times lower in linear luminance than `nrc-permuto`'s, so it clears the bar at 16, 4 and 20 samples: 40.4 images per second, 13.7 times stock Blender. The bar counts are seed-0 counts, as for the other rows; RECIPE.md section 5 has the other seeds.
 
+## RTX PRO 6000
+
+The same recipe on one NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120, 188 SMs, 96 GB). The card has RT cores, so every configuration runs two ways: the CUDA route, comparable with the H100 numbers, and an OptiX route that traces rays on the RT cores and shades with the same cubins. Same benchmark, same protocol, same baked `nrc` caches; per-scene medians over 9 runs on 3 GPUs.
+
+| samples per minute | monster | junkshop | classroom | total | image |
+|---|---|---|---|---|---|
+| stock Blender 5.3.0, CUDA | 4,052 | 2,671 | 2,369 | 9,092 | reference |
+| stock Blender 5.3.0, OptiX | 8,092 | 6,172 | 5,271 | 19,535 | reference |
+| `exact`, CUDA | 9,790 | 5,502 | 4,650 | 19,942 | equal to stock CUDA up to floating-point rounding |
+| `exact`, OptiX | 10,778 | 8,080 | 7,006 | 25,864 | equal to stock OptiX up to floating-point rounding |
+| `nrc`, CUDA | 33,890 | 19,571 | 21,385 | 74,847 | approximate, passes the image gate |
+| **`nrc`, OptiX** | **35,634** | **22,040** | **20,623** | **78,297** | approximate, passes the image gate |
+
+The largest change from the H100 configuration is the shade kernels' register budget: the H100's 64 registers are the worst point measured on sm_120, and 384 threads at 168 registers give +40%. The rest comes from gathering the hash grid inside the fused MLP kernel, fp16 accumulation in its `mma.sync` core, scrambling distance 0, per-scene build choices, and on the OptiX route an OptiX module register limit and the walk roulette of the CUDA SSS walk. Applied to an earlier OptiX tree for this card, the exact shading changes of this repository give 28,187 within the exact tier and 31,384 within the strict tier, below the seed-to-seed noise floor. [RESULTS-rtxpro6000.md](RESULTS-rtxpro6000.md) has every step, the image checks, what did not help and the reproduction; the configurations are in `configs/pro6000/` (CUDA), `configs/pro6000-optix/` and `patches/optix/` (OptiX), and `configs/pro6000-v53/` and `patches/v53/`.
+
 ## Reproduce
 
 Needs an H100, the CUDA 12.9 toolkit, GCC 14, CMake, git-lfs, and Python 3 with numpy and OpenEXR. `$W` is one work directory.
@@ -103,7 +119,7 @@ Four [Claude Code skills](skills/) distilled from how the work was done. Each is
 ## Future work
 
 - **More scenes.** Every gain here is fit to the three benchmark scenes. The next step is scenes the method has not seen: derive the per-scene kernel choices from scene content, which already matched hand tuning on the exact track, and make the bake part of loading a new scene.
-- **More hardware.** The kernels, launch bounds and register budgets are tuned for one H100. The same recipe should run on other compute and graphics GPUs, starting with the H200, B200 and RTX Pro 6000, where the balance between memory, registers and RT cores differs.
+- **More hardware.** The kernels, launch bounds and register budgets are tuned for one H100. The same recipe should run on other compute and graphics GPUs, starting with the H200 and B200, where the balance between memory, registers and RT cores differs. The RTX PRO 6000 port above is the first: it needed a different register budget and an OptiX route.
 
 ## Citation
 

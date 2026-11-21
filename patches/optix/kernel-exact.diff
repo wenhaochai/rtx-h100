@@ -1,0 +1,102 @@
+diff --git a/intern/cycles/kernel/integrator/nrc_types.h b/intern/cycles/kernel/integrator/nrc_types.h
+new file mode 100644
+index 0000000..ff7065b
+--- /dev/null
++++ b/intern/cycles/kernel/integrator/nrc_types.h
+@@ -0,0 +1,96 @@
++/* SPDX-FileCopyrightText: 2026 cycles-h100
++ *
++ * SPDX-License-Identifier: Apache-2.0 */
++
++/* Ours: neural radiance cache (NRC) shared layout. Included by the kernel (only with -DCYCLES_NRC) and by the
++ * host (integrator/nrc.cpp); the two copies of this file (tree53-nrc and blender-src-v5.3.0-svm) must stay
++ * identical. Every pointer is a device pointer; the host fills the struct and copies it to the cubin's
++ * __constant__ kernel_nrc symbol. */
++
++#pragma once
++
++#ifndef CYCLES_NRC_NV
++/* Vertices per training path: bins 1 .. NV-1 hold radiance by bounce, contributions at bounce >= NV-1 go to the
++ * last bin, vertices 1 .. NV-1 are stashed. */
++#  define CYCLES_NRC_NV 8
++#endif
++
++#define NRC_IN_FEATURES 16 /* = NRC_IN of nrc/include/cycles_nrc.h */
++#define NRC_SLOT_FREE 0
++#define NRC_SLOT_ACTIVE 1
++#define NRC_SLOT_DONE 2
++
++CCL_NAMESPACE_BEGIN
++
++/* Dynamic counters and flags, in device memory (written by kernels, read and reset by the host between
++ * kernel launches, stream-ordered). */
++struct NRCControl {
++  unsigned int query_count;  /* queries written (may exceed query_cap: extra ones are not written) */
++  unsigned int done_count;   /* entries in done_list */
++  unsigned int record_count; /* training records written by nrc_collect */
++  unsigned int slot_head;    /* ring allocator for training slots */
++  int terminate;             /* 1: non-training paths may end in the cache (0 during warm-up) */
++  int train;                 /* 1: tag training paths */
++  unsigned int dropped_queries;
++  unsigned int tagged;       /* training paths tagged (stats) */
++  float tau;                 /* record weighting: mean throughput of earlier records (0: no weighting yet) */
++  float T_sum;               /* sum of mean(T) over the records of this collect */
++  unsigned int T_count;
++  unsigned int pad;
++};
++
++/* Per training path (slot). */
++struct NRCSlot {
++  int status;    /* NRC_SLOT_* */
++  int ref;       /* main path + live shadow paths */
++  unsigned int mask; /* bit k: vertex k stashed */
++  int pad;
++};
++
++/* Query record metadata (inputs are a separate n x 16 fp16 array, outputs n x 3 fp32). */
++struct NRCQueryMeta {
++  unsigned int pixel; /* render_pixel_index */
++  float r, g, b;      /* path throughput after the bounce at the query vertex */
++};
++
++struct KernelNRC {
++  /* Static parameters. */
++  int enabled;
++  int min_bounce;           /* smallest bounce index (after the bounce) where a path may end */
++  float c;                  /* area-spread constant: end when spread^2 >= c * a0 */
++  int skip_singular;        /* never end after a singular (mirror/glass) bounce */
++  unsigned int train_threshold; /* tag when hash(pixel, sample) < threshold */
++  int num_slots;
++  int query_cap;
++  int record_cap;
++  float box_lo[4];
++  float box_scale[4]; /* 1 / extent */
++  int stub_log2;      /* stub hash table size log2 */
++  int stub_res;       /* stub grid resolution per axis */
++  int stub_dir;       /* stub: also key cells on the scattered direction (4 x 8 bins) */
++  int budget_feature; /* 1: features 14, 15 = remaining diffuse / glossy bounces (min with total) / 8 */
++  int train_match;    /* 1: a training path stashes only the vertex where a normal path would have ended */
++  int train_weight;   /* 1: write each record floor(mean(T) / tau + u) times (throughput-weighted regression) */
++  int diffuse_only;   /* nrc-bake: 1 = a path may end only after a diffuse bounce (label & LABEL_DIFFUSE) */
++  int pad[1];
++
++  /* Device arrays. */
++  ccl_global NRCControl *ctrl;
++  ccl_global int *main_slot;          /* [max_num_paths], -1 = not a training path */
++  ccl_global float *main_spread;      /* [max_num_paths * 2]: sqrt-sum S, a0 */
++  ccl_global int *shadow_slot;        /* [max_num_paths] */
++  ccl_global unsigned short *query_in; /* [query_cap * 16] fp16 */
++  ccl_global NRCQueryMeta *query_meta; /* [query_cap] */
++  ccl_global float *query_out;        /* [query_cap * 3] */
++  ccl_global NRCSlot *slots;          /* [num_slots] */
++  ccl_global unsigned short *slot_feat; /* [num_slots * NV * 16] fp16 */
++  ccl_global float *slot_T;           /* [num_slots * NV * 3] throughput after the bounce at vertex k */
++  ccl_global float *slot_bins;        /* [num_slots * NV * 3] radiance written with bounce k */
++  ccl_global int *done_list;          /* [num_slots] */
++  ccl_global unsigned short *rec_in;  /* [record_cap * 16] fp16 */
++  ccl_global float *rec_target;       /* [record_cap * 3] */
++  ccl_global float *rec_T;            /* [record_cap * 3] throughput of the record (stub weights) */
++  ccl_global float *stub_table;       /* [2^stub_log2 * 8]: sum T*target rgb, sum T rgb, count, 0 */
++};
++
++CCL_NAMESPACE_END

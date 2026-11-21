@@ -180,6 +180,35 @@ __device__ inline void mma16816(float* d, const uint32_t* a, uint32_t b0, uint32
 		  "f"(zero ? z : d[2]), "f"(zero ? z : d[3]));
 }
 
+#ifdef NRC_MMA_F16ACC
+// fp16-accumulate variant (RTX PRO 6000: GeForce-class Blackwell tensor cores may run fp16 accumulation at a higher
+// rate than fp32). d[0] = row g, d[1] = row g+8, each a half2 of cols 2*tq + {0,1}: the f32 fragment, packed.
+__device__ inline void mma16816h(uint32_t* d, const uint32_t* a, uint32_t b0, uint32_t b1, bool zero) {
+	const uint32_t z = 0u;
+	asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%8,%9};"
+	             : "=r"(d[0]), "=r"(d[1])
+	             : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(zero ? z : d[0]), "r"(zero ? z : d[1]));
+}
+template <int NB>
+__device__ inline void mma_layer_h(const uint32_t (&a)[4][4], const __half* W, uint32_t g, uint32_t tq, uint32_t* d) {
+	const __half* base = W + g * 64 + 2 * tq;
+#pragma unroll
+	for (int kb = 0; kb < 4; ++kb) {
+		const uint32_t c0 = ((2 * kb) ^ g) << 3, c1 = ((2 * kb + 1) ^ g) << 3;
+#pragma unroll
+		for (int j = 0; j < NB; ++j)
+			mma16816h(d + 2 * j, a[kb], *reinterpret_cast<const uint32_t*>(base + j * 512 + c0),
+			          *reinterpret_cast<const uint32_t*>(base + j * 512 + c1), kb == 0);
+	}
+}
+__device__ inline uint32_t relu_h2(uint32_t x) {
+	__half2 h = *reinterpret_cast<__half2*>(&x);
+	h = __hmax2(h, __float2half2_rn(0.0f));
+	return *reinterpret_cast<uint32_t*>(&h);
+}
+__device__ inline float2 u2f2(uint32_t x) { return __half22float2(*reinterpret_cast<__half2*>(&x)); }
+#endif
+
 // d[4j..4j+3] = rows (g, g+8) x cols 8j + 2*tq + {0,1} of A(16 x 64) * W^T, W = NB*8 rows of swizzled K-major weights.
 // Row 8j+g, k = 16kb + 2tq (+8) lies in 16-byte chunk 2kb (+1), stored at chunk (2kb (+1)) ^ g.
 template <int NB>
@@ -304,6 +333,45 @@ __global__ void __launch_bounds__(WG * 128, WG == 2 ? 3 : 1) fused_kernel(const 
 		if constexpr (CORE == CORE_WGMMA) fence_async_smem();
 		wg_bar(wg);
 
+#ifdef NRC_MMA_F16ACC
+		if constexpr (CORE == CORE_MMA) {
+			uint32_t A[4][4], dh[16];
+			const __half* rows = sA + (warp * 16 + g) * 64 + 2 * tq;
+#pragma unroll
+			for (int kb = 0; kb < 4; ++kb) {
+				const uint32_t c0 = ((2 * kb) ^ g) << 3, c1 = ((2 * kb + 1) ^ g) << 3;
+				A[kb][0] = *reinterpret_cast<const uint32_t*>(rows + c0);
+				A[kb][1] = *reinterpret_cast<const uint32_t*>(rows + 512 + c0);
+				A[kb][2] = *reinterpret_cast<const uint32_t*>(rows + c1);
+				A[kb][3] = *reinterpret_cast<const uint32_t*>(rows + 512 + c1);
+			}
+			mma_layer_h<8>(A, sW, g, tq, dh);
+			for (uint32_t layer = 1; layer <= a.hidden; ++layer) {
+#pragma unroll
+				for (int kb = 0; kb < 4; ++kb) {
+					A[kb][0] = relu_h2(dh[4 * kb + 0]);
+					A[kb][1] = relu_h2(dh[4 * kb + 1]);
+					A[kb][2] = relu_h2(dh[4 * kb + 2]);
+					A[kb][3] = relu_h2(dh[4 * kb + 3]);
+				}
+				if (layer < a.hidden) mma_layer_h<8>(A, sW + layer * 64 * 64, g, tq, dh);
+				else mma_layer_h<2>(A, Wout, g, tq, dh);
+			}
+			if (tq < 2) {
+				const uint32_t r0 = tile * TILE + warp * 16 + g, r1 = r0 + 8;
+				const float2 v0 = u2f2(dh[0]), v1 = u2f2(dh[1]);
+				if (r0 < a.n) {
+					a.out[(size_t)r0 * 3 + 2 * tq] = fmaxf(v0.x, 0.0f);
+					if (tq == 0) a.out[(size_t)r0 * 3 + 1] = fmaxf(v0.y, 0.0f);
+				}
+				if (r1 < a.n) {
+					a.out[(size_t)r1 * 3 + 2 * tq] = fmaxf(v1.x, 0.0f);
+					if (tq == 0) a.out[(size_t)r1 * 3 + 1] = fmaxf(v1.y, 0.0f);
+				}
+			}
+			continue;
+		}
+#endif
 		float d[32];
 		uint32_t A[4][4];
 		if constexpr (CORE == CORE_WGMMA) {

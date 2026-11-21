@@ -5,6 +5,7 @@
 # 64-neuron fully fused MLP are compiled, and the weights can be saved, loaded and frozen.
 # The fused inference kernel (nrc/src/nrc_fused.cu) uses wgmma (sm_90a); run_wgmma.json selects it at run time.
 # The frozen inference engine (nrc/src/nrc_infer.cu, sm_90a) runs NRCINF1 caches, hash or permuto; run_infer.json selects it.
+# Other GPUs run the fused kernel's mma.sync core (run_mma.json); for the RTX PRO 6000: ARCHS=120 FUSED_ARCHS=120-real.
 # Step 1 needs internet; step 2 runs anywhere with CUDA 12.9 (~5 GB per nvcc, ~30 min on 8 cores).
 set -euo pipefail
 OUT=${1:?out dir}; mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
@@ -28,7 +29,7 @@ fi
 # 2. build and link the shared engine
 export PATH=$CU/bin:$PATH
 cmake -S "$N" -B "$OUT/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$CU/bin/nvcc \
-  -DTCNN_CUDA_ARCHITECTURES="${ARCHS:-86;90}" > /dev/null
+  -DTCNN_CUDA_ARCHITECTURES="${ARCHS:-86;90}" ${FUSED_ARCHS:+-DNRC_FUSED_ARCHITECTURES=$FUSED_ARCHS} ${F16ACC:+-DNRC_MMA_F16ACC=ON} > /dev/null
 cmake --build "$OUT/build" --target cycles_nrc -j "${JOBS:-8}" > "$OUT/build.log" 2>&1 \
   || { grep -m20 -i "error" "$OUT/build.log"; exit 1; }
 B=$OUT/build; TB=$B/third_party/tiny-cuda-nn

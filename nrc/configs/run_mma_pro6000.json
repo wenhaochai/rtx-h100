@@ -1,0 +1,1 @@
+{"engine": "mma", "nrc": {"warmup_infer_batch": 2097152, "warmup_train_batch": 256, "fused_grid_levels": 0}}

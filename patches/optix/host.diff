@@ -1,0 +1,107 @@
+diff --git a/intern/cycles/device/optix/device_impl.cpp b/intern/cycles/device/optix/device_impl.cpp
+index 3787f5e..8f1fa00 100644
+--- a/intern/cycles/device/optix/device_impl.cpp
++++ b/intern/cycles/device/optix/device_impl.cpp
+@@ -293,6 +293,14 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
+   string ptx_filename;
+   if (need_optix_kernels) {
+     ptx_filename = path_get("lib/kernel_optix" + suffix + ".ptx.zst");
++    /* Ours: CYCLES_OPTIX_PTX=<file> loads that PTX (.zst or plain) as the base OptiX module (a per-scene kernel,
++     * like CYCLES_CUDA_CUBIN for the cubin); optional modules are then taken from the same directory
++     * (<dir>/kernel_optix_<name>.ptx.zst) when present. */
++    if (const char *ptx_override = getenv("CYCLES_OPTIX_PTX")) {
++      ptx_filename = ptx_override;
++      printf("CYCLES_OPTIX_PTX path=%s\n", ptx_filename.c_str());
++      fflush(stdout);
++    }
+     if (use_adaptive_compilation() || path_file_size(ptx_filename) == -1) {
+       std::string optix_include_dir = get_optix_include_dir();
+       if (optix_include_dir.empty()) {
+@@ -391,6 +399,12 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
+ 
+   OptixModuleCompileOptions module_options = {};
+   module_options.maxRegisterCount = 0; /* Do not set an explicit register limit. */
++  /* Ours: CYCLES_OPTIX_MAX_REGISTERS=<n> sets the register limit OptiX compiles the modules with. */
++  if (const char *max_regs = getenv("CYCLES_OPTIX_MAX_REGISTERS")) {
++    module_options.maxRegisterCount = atoi(max_regs);
++    printf("CYCLES_OPTIX_MAX_REGISTERS=%d\n", module_options.maxRegisterCount);
++    fflush(stdout);
++  }
+ 
+   if (DebugFlags().optix.use_debug) {
+     module_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+@@ -450,6 +464,14 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
+     auto load_optional_module = [this, &kernel_features](const string &name,
+                                                          string &ptx_data) -> bool {
+       string filename = path_get("lib/" + name + ".ptx.zst");
++      if (const char *ptx_override = getenv("CYCLES_OPTIX_PTX")) {
++        const string alt = path_join(path_dirname(ptx_override), name + ".ptx.zst");
++        if (path_file_size(alt) != -1) {
++          filename = alt;
++          printf("CYCLES_OPTIX_PTX optional module %s\n", filename.c_str());
++          fflush(stdout);
++        }
++      }
+       if (use_adaptive_compilation() || path_file_size(filename) == -1) {
+         /* Map kernel_optix_foo.ptx to kernel_foo.cu. */
+         const char *suffix = "_optix";
+@@ -2036,6 +2058,14 @@ void OptiXDevice::const_copy_to(const char *name, void *host, const size_t size)
+     return;
+   }
+ 
++  /* Ours (NRC): the cache's constants go into the launch parameters (kernel/device/optix/globals.h). */
++  if (strcmp(name, "kernel_nrc") == 0) {
++    if (size == sizeof(KernelNRC)) {
++      update_launch_params(offsetof(KernelParamsOptiX, nrc), host, size);
++    }
++    return;
++  }
++
+   /* Update data storage pointers in launch parameters. */
+ #  define KERNEL_DATA_ARRAY(data_type, data_name) \
+     if (strcmp(name, #data_name) == 0) { \
+diff --git a/intern/cycles/kernel/device/optix/compat.h b/intern/cycles/kernel/device/optix/compat.h
+index 7a05898..1428403 100644
+--- a/intern/cycles/kernel/device/optix/compat.h
++++ b/intern/cycles/kernel/device/optix/compat.h
+@@ -36,6 +36,9 @@ typedef unsigned long long uint64_t;
+ #define ccl_device_extern extern "C" __device__
+ #define ccl_device_inline ccl_device
+ #define ccl_device_forceinline ccl_device
++/* Ours: the hot-function qualifiers of the CUDA cubin (CYCLES_INLINE_HOT); OptiX inlines everything anyway. */
++#define ccl_device_hot ccl_device
++#define ccl_device_hot2 ccl_device
+ #define ccl_device_inline_method __device__ __forceinline__
+ #define ccl_device_template_spec template<> __device__ __forceinline__
+ #define ccl_device_noinline static __device__ __noinline__
+diff --git a/intern/cycles/kernel/device/optix/globals.h b/intern/cycles/kernel/device/optix/globals.h
+index ebe4689..539b802 100644
+--- a/intern/cycles/kernel/device/optix/globals.h
++++ b/intern/cycles/kernel/device/optix/globals.h
+@@ -14,6 +14,10 @@
+ #include "util/color.h"
+ #include "util/types_image.h"
+ 
++/* Ours (NRC on OptiX): the cache's KernelNRC rides in the launch parameters, since an OptiX module's own
++ * __constant__ symbols cannot be set by the host. Always present, so host and kernel agree on the layout. */
++#include "kernel/integrator/nrc_types.h"
++
+ CCL_NAMESPACE_BEGIN
+ 
+ /* Not actually used, just a nullptr pointer that gets passed everywhere, which we
+@@ -45,6 +49,8 @@ struct KernelParamsOptiX {
+   IntegratorStateGPU integrator_state;
+ 
+   void *osl_colorsystem;
++
++  KernelNRC nrc; /* Ours: see above; OptiXDevice::const_copy_to("kernel_nrc") fills it */
+ };
+ 
+ #ifdef __NVCC__
+@@ -61,5 +67,6 @@ extern "C"
+ #define kernel_data_fetch(name, index) kernel_params.name[(index)]
+ #define kernel_data_write(name, index, value) kernel_params.name[(index)] = (value)
+ #define kernel_integrator_state kernel_params.integrator_state
++#define kernel_nrc kernel_params.nrc
+ 
+ CCL_NAMESPACE_END

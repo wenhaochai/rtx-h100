@@ -9,7 +9,7 @@ import glob
 scene_env = {}
 for part in filter(None, os.environ.get("SCENE_ENV", "").split(";")):
     name, kvs = part.split(":", 1)
-    scene_env[name] = dict(kv.split("=", 1) for kv in kvs.split(","))
+    scene_env[name] = dict(kv.split("=", 1) for kv in kvs.split(",") if kv)
 out = []
 for s in scenes:
     env = {**os.environ, **scene_env.get(s, {})}
@@ -18,7 +18,7 @@ for s in scenes:
     blend = glob.glob(f"{scenes_dir}/*/{s}/main.blend")[0]
     base = [blender, "--background", "--factory-startup", "-noaudio", "--debug-cycles", "--enable-autoexec",
             "--engine", "CYCLES", blend] + (["--python-expr", os.environ["PRE_PY"]] if os.environ.get("PRE_PY") else []) + [
-            "--python", main_py, "--", "--device-type", "CUDA"]
+            "--python", main_py, "--", "--device-type", os.environ.get("BENCH_DEVICE", "CUDA")]
     w = subprocess.run(base + ["--warm-up"], capture_output=True, text=True, env=env)
     if w.returncode:
         sys.exit(f"direct_bench: warm-up of {s} failed ({w.returncode}):\n{(w.stdout + w.stderr)[-3000:]}")

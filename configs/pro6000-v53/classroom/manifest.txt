@@ -1,0 +1,13 @@
+version cycles-5.3-svm-specialize-1
+key dcc9fbcb2d2e990c30e1c6a33566ef70
+words 69916
+shaders 92
+programs 276
+instructions 1676
+specialized 92
+specialized_instructions 1492
+empty 184
+policy_fallbacks 0
+errors 0
+selective 0
+header /home/shadeform/rtx6000-work/results/c12_stack53/export/classroom-full/svm_specialized.h

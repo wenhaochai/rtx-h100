@@ -27,7 +27,17 @@ set(NRC_CUTLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tiny-cuda-nn/dep
 add_library(nrc_fused OBJECT src/nrc_fused.cu)
 target_include_directories(nrc_fused PRIVATE ${NRC_CUTLASS_INCLUDE})
 target_compile_options(nrc_fused PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
-set_target_properties(nrc_fused PROPERTIES CUDA_ARCHITECTURES "86-real;90a-real")
+# NRC_FUSED_ARCHITECTURES: e.g. "120-real" for the RTX PRO 6000 (Blackwell, sm_120), which runs the mma.sync core.
+if (NOT NRC_FUSED_ARCHITECTURES)
+  set(NRC_FUSED_ARCHITECTURES "86-real;90a-real")
+endif()
+set_target_properties(nrc_fused PROPERTIES CUDA_ARCHITECTURES "${NRC_FUSED_ARCHITECTURES}")
+# NRC_MMA_F16ACC=ON: the mma.sync core accumulates in fp16 (src/nrc_fused.cu); the engine's self check against tcnn
+# still guards it (a failing check falls back to tcnn inference).
+option(NRC_MMA_F16ACC "fp16 accumulation in the fused mma.sync core" OFF)
+if (NRC_MMA_F16ACC)
+  target_compile_definitions(nrc_fused PRIVATE NRC_MMA_F16ACC)
+endif()
 
 # Frozen-weight inference (src/nrc_infer.cu, "engine": "infer"): hash or permutohedral lattice grid, MLP width 64-256,
 # fp16 or fp8 wgmma. sm_90a only.

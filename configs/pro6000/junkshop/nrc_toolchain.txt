@@ -1,0 +1,2 @@
+NVCC=/usr/local/cuda-12.9/bin/nvcc
+NVCC_EXTRA=--jump-table-density 80

@@ -5,9 +5,11 @@ args = sys.argv[sys.argv.index("--") + 1:]
 out, spp = args[:2]
 seed = int(args[2]) if len(args) > 2 else 0
 prefs = bpy.context.preferences.addons["cycles"].preferences
-prefs.compute_device_type = "CUDA"
+import os
+dev_type = os.environ.get("CHECK_DEVICE", "CUDA")   # OPTIX for the RTX route
+prefs.compute_device_type = dev_type
 prefs.get_devices()
-cuda = [d for d in prefs.devices if d.type == "CUDA"]
+cuda = [d for d in prefs.devices if d.type == dev_type]
 for d in prefs.devices:
     d.use = False
 cuda[0].use = True

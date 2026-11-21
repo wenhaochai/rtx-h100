@@ -1,0 +1,11 @@
+# Run settings of the OptiX-route configurations on the rtxpro6000-blender Blender 5.3.0 host (build-v53all: v5.3.0 +
+# blender-5.3.0/patches/v53-all.patch), device OPTIX, CYCLES_CONCURRENT_STATES_FACTOR=16 for every scene.
+# <cubins> = scripts/build_cubins_v53.sh output; <ptx> = that project's per-scene base PTX (v53all-feat-<scene>, built from
+# the v53-all tree without patches/v53: patches/v53 only changes kernels in the cubin).
+exact  monster    CYCLES_CUDA_CUBIN=<cubins>/monster/kernel_sm_120.cubin.zst CYCLES_OPTIX_PTX=<ptx>/monster CYCLES_OPTIX_MAX_REGISTERS=0 CYCLES_SORT_PARTITIONS=564 CYCLES_SSS_STEPS_PER_LAUNCH=48
+exact  junkshop   CYCLES_CUDA_CUBIN=<cubins>/junkshop/kernel_sm_120.cubin.zst CYCLES_OPTIX_PTX=<ptx>/junkshop CYCLES_OPTIX_MAX_REGISTERS=72 CYCLES_SORT_PARTITIONS=564 CYCLES_SSS_STEPS_PER_LAUNCH=0
+exact  classroom  CYCLES_CUDA_CUBIN=<cubins>/classroom/kernel_sm_120.cubin.zst CYCLES_OPTIX_PTX=<ptx>/classroom CYCLES_OPTIX_MAX_REGISTERS=64 CYCLES_SORT_PARTITIONS=564 CYCLES_SSS_STEPS_PER_LAUNCH=0
+strict monster    as exact (no OptiX register limit) + CYCLES_SVM_SPECIALIZE=1
+strict junkshop   as exact + CYCLES_SVM_SPECIALIZE=1
+strict classroom  as exact + CYCLES_SVM_SPECIALIZE=1
+# exact_nofold: the exact settings with the exact_nofold cubins.

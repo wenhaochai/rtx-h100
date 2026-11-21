@@ -1,0 +1,98 @@
+diff --git a/intern/cycles/kernel/device/cuda/globals.h b/intern/cycles/kernel/device/cuda/globals.h
+index 68b1a41..a266b4b 100644
+--- a/intern/cycles/kernel/device/cuda/globals.h
++++ b/intern/cycles/kernel/device/cuda/globals.h
+@@ -23,9 +23,41 @@ struct KernelGlobalsGPU {
+ };
+ using KernelGlobals = const ccl_global KernelGlobalsGPU *ccl_restrict;
+ 
++#ifdef CYCLES_KDATA_CONST
++/* Ours: per-scene compile-time KernelData. The generated header CYCLES_KDATA_CONST_HEADER defines one struct
++ * KDC_<Struct> per data_template.h struct, derived from it with no extra storage; its static constexpr members
++ * shadow the folded fields, so kernel_data.<parent>.<name> is a constant for them and a __constant__ load for the
++ * rest. KernelDataKC has KernelData's layout, so the host uploads the same bytes. */
++#  include CYCLES_KDATA_CONST_HEADER
++struct ccl_align(16) KernelDataKC {
++  uint64_t kernel_features;
++  uint max_closures;
++  uint max_shaders;
++  uint volume_stack_size;
++  KernelCamera cam;
++  KernelBake bake;
++  KernelTables tables;
++  KernelLightLinkSet light_link_sets[LIGHT_LINK_SET_MAX];
++  KernelSceneTime scene_time;
++#  define KERNEL_STRUCT_BEGIN(name, parent) KDC_##name parent;
++#  include "kernel/data_template.h"
++  int device_bvh, pad1;
++  int pad2, pad3;
++};
++static_assert(sizeof(KernelDataKC) == sizeof(KernelData), "KernelDataKC layout");
++static_assert(offsetof(KernelDataKC, background) == offsetof(KernelData, background), "KernelDataKC layout");
++static_assert(offsetof(KernelDataKC, integrator) == offsetof(KernelData, integrator), "KernelDataKC layout");
++static_assert(offsetof(KernelDataKC, svm_usage) == offsetof(KernelData, svm_usage), "KernelDataKC layout");
++static_assert(offsetof(KernelDataKC, device_bvh) == offsetof(KernelData, device_bvh), "KernelDataKC layout");
++#endif
++
+ struct KernelParamsCUDA {
+   /* Global scene data and textures */
++#ifdef CYCLES_KDATA_CONST
++  KernelDataKC data;
++#else
+   KernelData data;
++#endif
+ #define KERNEL_DATA_ARRAY(type, name) const type *name;
+ #define KERNEL_DATA_ARRAY_WRITABLE(type, name) type *name;
+ #include "kernel/data_arrays.h"
+diff --git a/intern/cycles/kernel/device/gpu/kernel.h b/intern/cycles/kernel/device/gpu/kernel.h
+index 2c249b3..cd12dd2 100644
+--- a/intern/cycles/kernel/device/gpu/kernel.h
++++ b/intern/cycles/kernel/device/gpu/kernel.h
+@@ -20,6 +20,35 @@
+ #endif
+ 
+ #include "kernel/device/gpu/work_stealing.h"
++#if defined(CYCLES_KDATA_DUMP) && defined(__KERNEL_CUDA__)
++/* Ours: print KernelData (field table once, then every distinct upload as raw words) from
++ * integrator_init_from_camera, for the per-scene constant folding of CYCLES_KDATA_CONST. */
++__device__ unsigned int kdc_dump_hash;
++__device__ int kdc_dump_count;
++ccl_device_noinline void kdata_dump()
++{
++  const unsigned int *w = (const unsigned int *)&kernel_params.data;
++  const int n = (int)(sizeof(KernelData) / 4);
++  unsigned int h = 2166136261u;
++  for (int i = 0; i < n; i++) {
++    h = (h ^ w[i]) * 16777619u;
++  }
++  if (kdc_dump_count && h == kdc_dump_hash) {
++    return;
++  }
++  kdc_dump_hash = h;
++  const int c = kdc_dump_count++;
++  printf("KDH %d %08x %d\n", c, h, n);
++  if (c == 0) {
++#  define KERNEL_STRUCT_MEMBER(parent, type, name) \
++    printf("KDF %s %s %s %d %d\n", #parent, #type, #name, (int)offsetof(KernelData, parent.name), (int)sizeof(type));
++#  include "kernel/data_template.h"
++  }
++  for (int i = 0; i < n; i += 4) {
++    printf("KDW %d %d %08x %08x %08x %08x\n", c, i, w[i], w[i + 1], w[i + 2], w[i + 3]);
++  }
++}
++#endif
+ 
+ #include "kernel/integrator/state.h"
+ #include "kernel/integrator/state_flow.h"
+@@ -95,6 +124,11 @@ ccl_gpu_kernel_kb(INIT_FROM_CAMERA)
+                              const int num_active_paths)
+ {
+   const int work_index = ccl_gpu_global_id_x();
++#if defined(CYCLES_KDATA_DUMP) && defined(__KERNEL_CUDA__)
++  if (work_index == 0) {
++    kdata_dump();
++  }
++#endif
+ 
+   if (tiles) {
+     if (work_index >= max_tile_work_size * num_tiles) {

@@ -26,7 +26,8 @@ for d in dumps:
             seen.setdefault(key, set()).add(tuple(w[off // 4 + k] for k in range(size // 4)))
 assert fields, "no KDF lines"
 STRUCT = {"background": "KernelBackground", "bvh": "KernelBVH", "film": "KernelFilm", "integrator": "KernelIntegrator",
-          "image": "KernelImage", "svm_usage": "KernelSVMUsage"}
+          "image": "KernelImage", "svm_usage": "KernelSVMUsage",
+          "svm_specialization": "KernelSVMSpecialization"}   # the last: trees with SVM specialization (rtx6000 v53-all)
 def lit(t, w):
     if t == "float":
         f = struct.unpack("<f", struct.pack("<I", w))[0]

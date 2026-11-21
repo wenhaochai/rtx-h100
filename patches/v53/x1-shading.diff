@@ -1,0 +1,190 @@
+diff --git a/intern/cycles/kernel/bvh/local.h b/intern/cycles/kernel/bvh/local.h
+index 1d25571..7aca1a8 100644
+--- a/intern/cycles/kernel/bvh/local.h
++++ b/intern/cycles/kernel/bvh/local.h
+@@ -22,7 +22,7 @@
+ #ifndef __KERNEL_GPU__
+ ccl_device
+ #else
+-ccl_device_inline
++ccl_device_hot
+ #endif
+     bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
+                                      const ccl_private Ray *ray,
+@@ -219,7 +219,7 @@ ccl_device_inline
+   return false;
+ }
+ 
+-ccl_device_inline bool BVH_FUNCTION_NAME(KernelGlobals kg,
++ccl_device_hot bool BVH_FUNCTION_NAME(KernelGlobals kg,
+                                          const ccl_private Ray *ray,
+                                          ccl_private LocalIntersection *local_isect,
+                                          const int local_object,
+diff --git a/intern/cycles/kernel/closure/bsdf.h b/intern/cycles/kernel/closure/bsdf.h
+index b8d72a5..28922b1 100644
+--- a/intern/cycles/kernel/closure/bsdf.h
++++ b/intern/cycles/kernel/closure/bsdf.h
+@@ -170,7 +170,7 @@ ccl_device_inline bool bsdf_is_transmission(const ccl_private ShaderClosure *sc,
+   return dot(sc->N, wo) < 0.0f;
+ }
+ 
+-ccl_device_inline int bsdf_sample(KernelGlobals kg,
++ccl_device_hot int bsdf_sample(KernelGlobals kg,
+                                   ccl_private ShaderData *sd,
+                                   const ccl_private ShaderClosure *sc,
+                                   const float3 rand,
+@@ -549,7 +549,7 @@ ccl_device_inline int bsdf_label(const KernelGlobals kg,
+ #ifndef __KERNEL_CUDA__
+ ccl_device
+ #else
+-ccl_device_inline
++ccl_device_hot
+ #endif
+     Spectrum bsdf_eval(KernelGlobals kg,
+                        ccl_private ShaderData *sd,
+diff --git a/intern/cycles/kernel/closure/bsdf_microfacet.h b/intern/cycles/kernel/closure/bsdf_microfacet.h
+index b9261e4..2bcb2a2 100644
+--- a/intern/cycles/kernel/closure/bsdf_microfacet.h
++++ b/intern/cycles/kernel/closure/bsdf_microfacet.h
+@@ -1222,7 +1222,7 @@ ccl_device void bsdf_microfacet_blur(ccl_private ShaderClosure *sc, const float
+   bsdf->alpha_y = fmaxf(roughness, bsdf->alpha_y);
+ }
+ 
+-ccl_device Spectrum bsdf_microfacet_ggx_eval(KernelGlobals kg,
++ccl_device_hot Spectrum bsdf_microfacet_ggx_eval(KernelGlobals kg,
+                                              const ccl_private ShaderClosure *sc,
+                                              const float3 wi,
+                                              const float3 wo,
+@@ -1232,7 +1232,7 @@ ccl_device Spectrum bsdf_microfacet_ggx_eval(KernelGlobals kg,
+   return bsdf->energy_scale * bsdf_microfacet_eval<MicrofacetType::GGX>(kg, sc, wi, wo, pdf);
+ }
+ 
+-ccl_device int bsdf_microfacet_ggx_sample(KernelGlobals kg,
++ccl_device_hot int bsdf_microfacet_ggx_sample(KernelGlobals kg,
+                                           const ccl_private ShaderClosure *sc,
+                                           const float3 Ng,
+                                           const float3 wi,
+diff --git a/intern/cycles/kernel/device/cuda/compat.h b/intern/cycles/kernel/device/cuda/compat.h
+index fe130c3..3dd2fad 100644
+--- a/intern/cycles/kernel/device/cuda/compat.h
++++ b/intern/cycles/kernel/device/cuda/compat.h
+@@ -35,6 +35,19 @@ typedef unsigned long long uint64_t;
+ #define ccl_device_inline __device__ __inline__
+ #define ccl_device_forceinline __device__ __forceinline__
+ #define ccl_device_noinline __device__ __noinline__
++/* Ours: CYCLES_INLINE_HOT=1 force-inlines the hot BSDF, shader-setup, local-BVH and light-tree functions that
++ * nvcc inlines once SVM node pruning shrinks the interpreter; =2 also the surface_shader BSDF evaluators.
++ * Unset: the same qualifier as before (__inline__), so the cubin does not change. */
++#if defined(CYCLES_INLINE_HOT) && CYCLES_INLINE_HOT >= 1
++#  define ccl_device_hot __device__ __forceinline__
++#else
++#  define ccl_device_hot __device__ __inline__
++#endif
++#if defined(CYCLES_INLINE_HOT) && CYCLES_INLINE_HOT >= 2
++#  define ccl_device_hot2 __device__ __forceinline__
++#else
++#  define ccl_device_hot2 __device__ __inline__
++#endif
+ #define ccl_device_noinline_cpu ccl_device
+ #define ccl_device_inline_method ccl_device
+ #define ccl_device_template_spec template<> ccl_device_inline
+diff --git a/intern/cycles/kernel/geom/shader_data.h b/intern/cycles/kernel/geom/shader_data.h
+index ed9525f..b2f4957 100644
+--- a/intern/cycles/kernel/geom/shader_data.h
++++ b/intern/cycles/kernel/geom/shader_data.h
+@@ -43,7 +43,7 @@ ccl_device void shader_setup_object_transforms(KernelGlobals kg,
+ #ifdef __KERNEL_HIP__
+ ccl_device_noinline
+ #else
+-ccl_device_inline
++ccl_device_hot
+ #endif
+     void shader_setup_from_ray(KernelGlobals kg,
+                                ccl_private ShaderData *ccl_restrict sd,
+diff --git a/intern/cycles/kernel/integrator/subsurface.h b/intern/cycles/kernel/integrator/subsurface.h
+index 7055deb..28d153b 100644
+--- a/intern/cycles/kernel/integrator/subsurface.h
++++ b/intern/cycles/kernel/integrator/subsurface.h
+@@ -175,7 +175,7 @@ ccl_device void subsurface_shader_data_setup(KernelGlobals kg, ccl_private Shade
+   bsdf_diffuse_setup(sd, N, weight);
+ }
+ 
+-ccl_device_inline bool subsurface_scatter(KernelGlobals kg, IntegratorState state)
++ccl_device_hot bool subsurface_scatter(KernelGlobals kg, IntegratorState state)
+ {
+   RNGState rng_state;
+   path_state_rng_load(state, &rng_state);
+diff --git a/intern/cycles/kernel/integrator/surface_shader.h b/intern/cycles/kernel/integrator/surface_shader.h
+index 43b8662..2d34ec0 100644
+--- a/intern/cycles/kernel/integrator/surface_shader.h
++++ b/intern/cycles/kernel/integrator/surface_shader.h
+@@ -274,7 +274,7 @@ ccl_device_forceinline bool _surface_shader_exclude(ClosureType type,
+   return false;
+ }
+ 
+-ccl_device_inline float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
++ccl_device_hot2 float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
+                                                       ccl_private ShaderData *sd,
+                                                       const float3 wo,
+                                                       const ccl_private ShaderClosure *skip_sc,
+@@ -384,7 +384,7 @@ ccl_device_inline float surface_shader_bsdf_eval_pdfs(const KernelGlobals kg,
+ #ifndef __KERNEL_CUDA__
+ ccl_device
+ #else
+-ccl_device_inline
++ccl_device_hot2
+ #endif
+     float surface_shader_bsdf_eval(KernelGlobals kg,
+                                    ccl_attr_maybe_unused IntegratorState state,
+@@ -975,7 +975,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure(
+ 
+ /* Sample direction for picked BSDF, and return evaluation and pdf for all
+  * BSDFs combined using MIS. */
+-ccl_device int surface_shader_bsdf_sample_closure(KernelGlobals kg,
++ccl_device_hot2 int surface_shader_bsdf_sample_closure(KernelGlobals kg,
+                                                   ccl_private ShaderData *sd,
+                                                   const ccl_private ShaderClosure *sc,
+                                                   const float3 rand_bsdf,
+@@ -1273,6 +1273,11 @@ ccl_device void surface_shader_eval(KernelGlobals kg,
+   }
+   else {
+     max_closures = use_caustics_storage ? CAUSTICS_MAX_CLOSURE : kernel_data.max_closures;
++#ifdef __MAX_CLOSURE__
++    /* Ours: a per-scene build with a smaller closure array (-D__MAX_CLOSURE__ >= the scene's count) never
++     * writes past it, even if the host asks for more. */
++    max_closures = min(max_closures, MAX_CLOSURE);
++#endif
+   }
+ 
+   sd->num_closure = 0;
+diff --git a/intern/cycles/kernel/light/tree.h b/intern/cycles/kernel/light/tree.h
+index e20208a..4b030f4 100644
+--- a/intern/cycles/kernel/light/tree.h
++++ b/intern/cycles/kernel/light/tree.h
+@@ -811,7 +811,7 @@ ccl_device bool light_tree_sample(KernelGlobals kg,
+ 
+ /* We need to be able to find the probability of selecting a given light for MIS. */
+ template<bool in_volume_segment>
+-ccl_device float light_tree_pdf(KernelGlobals kg,
++ccl_device_hot float light_tree_pdf(KernelGlobals kg,
+                                 float3 P,
+                                 float3 N,
+                                 const float dt,
+diff --git a/intern/cycles/kernel/svm/svm.h b/intern/cycles/kernel/svm/svm.h
+index 808d6ad..ab07f07 100644
+--- a/intern/cycles/kernel/svm/svm.h
++++ b/intern/cycles/kernel/svm/svm.h
+@@ -109,6 +109,13 @@ CCL_NAMESPACE_BEGIN
+ #  define SVM_CASE_USAGE(node) \
+     if (!kernel_data_svm_usage_##node) \
+       break;
++#elif defined(CYCLES_SVM_NODES_USED)
++/* rtx-h100 (03-best): per-scene build. svm_nodes_used.h defines CYCLES_SVM_USED_<node> as 1 for every node type the
++ * scene's shaders use and 0 otherwise, so the cases of unused node types compile to nothing. */
++#  include "svm_nodes_used.h"
++#  define SVM_CASE_USAGE(node) \
++    if (!CYCLES_SVM_USED_##node) \
++      break;
+ #else
+ #  define SVM_CASE_USAGE(node)
+ #endif
