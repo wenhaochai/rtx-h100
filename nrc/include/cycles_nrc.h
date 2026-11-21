@@ -29,6 +29,11 @@
  * fused sm_90a kernel (nrc_fused.cu; mma.sync on other GPUs), "mma" the same kernel with mma.sync. Fused engines need
  * the default model shape (any hidden-layer count 1-8, grid size, scale) and fall back if their create-time self check
  * against tcnn fails. "nrc": {"fused_grid_levels": -1 (by L2 size) | 0 (gathers in the kernel) | k, "fused_wg": 0|2|4}.
+ * "engine": "infer" (nrc_infer.cu): frozen weights from the NRCINF1 file named by CYCLES_NRC_LOAD (or "nrc": {"weights":
+ * path}), no tcnn model; hash grid or permutohedral lattice grid ("encoding": "permuto" in the file), MLP width
+ * 64/128/256, depth 1-16, ReLU or SiLU, fp16 or fp8 (e4m3). sm_90 only (wgmma). nrc_train is a no-op returning 0.
+ * "nrc": {"infer_nc": 0 (auto) | 2 | 3, "infer_silu": "ex2" (default) | "h2", "infer_grid_levels": -1 (auto) | 0 | k,
+ * "infer_rs": 0 | 1, "infer_cluster": 1 (default) | 2}.
  *
  * Return values: nrc_create returns NULL on error; nrc_infer and nrc_train return 0 on success, -1 on error
  * (a message goes to stderr).

@@ -4,6 +4,7 @@
 # tiny-cuda-nn is pinned and patched (nrc/patches): only the 3D hash grid and the
 # 64-neuron fully fused MLP are compiled, and the weights can be saved, loaded and frozen.
 # The fused inference kernel (nrc/src/nrc_fused.cu) uses wgmma (sm_90a); run_wgmma.json selects it at run time.
+# The frozen inference engine (nrc/src/nrc_infer.cu, sm_90a) runs NRCINF1 caches, hash or permuto; run_infer.json selects it.
 # Step 1 needs internet; step 2 runs anywhere with CUDA 12.9 (~5 GB per nvcc, ~30 min on 8 cores).
 set -euo pipefail
 OUT=${1:?out dir}; mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)

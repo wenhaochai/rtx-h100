@@ -29,7 +29,14 @@ target_include_directories(nrc_fused PRIVATE ${NRC_CUTLASS_INCLUDE})
 target_compile_options(nrc_fused PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 set_target_properties(nrc_fused PROPERTIES CUDA_ARCHITECTURES "86-real;90a-real")
 
-add_library(cycles_nrc STATIC src/cycles_nrc.cu $<TARGET_OBJECTS:nrc_fused>)
+# Frozen-weight inference (src/nrc_infer.cu, "engine": "infer"): hash or permutohedral lattice grid, MLP width 64-256,
+# fp16 or fp8 wgmma. sm_90a only.
+add_library(nrc_infer OBJECT src/nrc_infer.cu)
+target_include_directories(nrc_infer PRIVATE ${NRC_CUTLASS_INCLUDE} third_party/tiny-cuda-nn/dependencies)
+target_compile_options(nrc_infer PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v --expt-relaxed-constexpr>)
+set_target_properties(nrc_infer PROPERTIES CUDA_ARCHITECTURES "90a-real")
+
+add_library(cycles_nrc STATIC src/cycles_nrc.cu $<TARGET_OBJECTS:nrc_fused> $<TARGET_OBJECTS:nrc_infer>)
 target_include_directories(cycles_nrc PUBLIC include)
 target_link_libraries(cycles_nrc PUBLIC tiny-cuda-nn)
 set_target_properties(cycles_nrc PROPERTIES CUDA_ARCHITECTURES "${TCNN_CUDA_ARCHITECTURES}")

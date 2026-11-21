@@ -2,6 +2,7 @@
 #include "cycles_nrc.h"
 #include "cycles_nrc_debug.h"
 #include "nrc_fused.h"
+#include "nrc_infer.h"
 
 #include <tiny-cuda-nn/common.h>
 #include <tiny-cuda-nn/config.h>
@@ -132,7 +133,12 @@ struct NrcEngine {
 	std::string engine = "tcnn";
 	bool fused = false;
 	nrc_fused::Plan plan;
-	GPUMemory<__half2> enc;  // split-mode workspace, 16 x n
+	GPUMemory<__half2> enc;  // split-mode workspace, 16 x n (engine infer: enc_half2 x n)
+
+	// "engine": "infer": frozen weights from an NRCINF1 file (nrc_infer.cu); no tcnn model, nrc_train is a no-op.
+	bool frozen_infer = false;
+	nrcw::Plan iplan;
+	~NrcEngine() { if (frozen_infer) nrcw::destroy(iplan); }
 
 	void ensure(uint32_t m) {
 		if (in_f.size() < (size_t)m * N_USED) in_f.resize((size_t)m * N_USED);
@@ -158,7 +164,11 @@ struct NrcEngine {
 
 	void infer(cudaStream_t stream, uint32_t n, const __half* in, float* rgb) {
 		if (n == 0) return;
-		if (fused) infer_fused(stream, n, in, rgb);
+		if (frozen_infer) {
+			const uint32_t ew = nrcw::enc_half2(iplan);  // 16 (split hash grid), 32 (permuto) or 0
+			if (ew && enc.size() < (size_t)n * ew) enc.resize((size_t)n * ew);  // growth syncs; warm-up sizes it
+			CUDA_CHECK_THROW(nrcw::infer(iplan, stream, n, in, rgb, ew ? enc.data() : nullptr));
+		} else if (fused) infer_fused(stream, n, in, rgb);
 		else infer_tcnn(stream, n, in, rgb);
 		++n_infer;
 	}
@@ -176,7 +186,7 @@ struct NrcEngine {
 	}
 
 	void train(cudaStream_t stream, uint32_t n, const __half* in, const float* target, uint32_t steps) {
-		if (n == 0) return;
+		if (n == 0 || frozen_infer) return;
 		if (dump) dump_records(stream, n, in, target);
 		if (frozen) return;
 		if (steps == 0) steps = 1;
@@ -414,6 +424,37 @@ extern "C" NrcEngine* nrc_create(const char* json_config, void* cu_stream) {
 		CUDA_CHECK_THROW(cudaSetDevice((int)dev));  // binds the same (primary) context; makes cudaGetDevice agree
 
 		e->config = default_config();
+		const json user = json_config && json_config[0] ? json::parse(json_config) : json::object();
+		cudaStream_t stream = (cudaStream_t)cu_stream;
+		e->create_stream = stream;
+		if (user.value("engine", "tcnn") == "infer") {
+			// Frozen inference (nrc_infer.cu): weights from CYCLES_NRC_LOAD or "nrc": {"weights": path} (NRCINF1).
+			if (user.contains("nrc")) e->config["nrc"].update(user["nrc"]);
+			std::string path = e->config["nrc"].value("weights", "");
+			if (const char* lp = getenv("CYCLES_NRC_LOAD"); lp && *lp) path = lp;
+			if (path.empty()) throw std::runtime_error{"engine infer needs CYCLES_NRC_LOAD or nrc.weights (an NRCINF1 file)"};
+			nrcw::HostModel hm;
+			std::string err;
+			if (!nrcw::load_nrcinf(path.c_str(), hm, &err)) throw std::runtime_error{err};
+			const json& o = e->config["nrc"];
+			const nrcw::SiluImpl si = o.value("infer_silu", "ex2") == "h2" ? nrcw::SILU_H2 : nrcw::SILU_EX2;
+			if (!nrcw::create(e->iplan, hm, o.value("infer_nc", 0), &err, si, o.value("infer_cluster", 1), o.value("infer_rs", 0) != 0)) throw std::runtime_error{err};
+			if (const int lpp = o.value("infer_grid_levels", -1); lpp >= 0) e->iplan.levels_per_pass = std::min(lpp, 16);
+			e->iplan.sort_bits = o.value("infer_sort_bits", 0);
+			e->frozen_infer = true;
+			e->engine = "infer";
+			if (const uint32_t ew = nrcw::enc_half2(e->iplan)) e->enc.resize((size_t)round_up(o.value("warmup_infer_batch", 1u << 18)) * ew);
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			fprintf(stderr, "cycles_nrc: engine infer: %s, width %d, depth %d, %s, %s, %d consumer warpgroups, %d of %d "
+			        "chunks in %d stages (%s), %zu B smem, %d regs, grid levels per pass %d\n", path.c_str(), hm.width, hm.depth,
+			        hm.fp8 ? "fp8" : "fp16", hm.act == nrcw::ACT_SILU ? "silu" : "relu", e->iplan.nc,
+			        std::min(e->iplan.chunks, e->iplan.stages), e->iplan.chunks, e->iplan.stages,
+			        e->iplan.resident ? "resident" : "streamed", e->iplan.smem, e->iplan.regs, e->iplan.levels_per_pass);
+			if (hm.encoding == nrcw::ENC_PERMUTO)
+				fprintf(stderr, "cycles_nrc: engine infer: permuto encoding, d %d, %d levels x %d features, 2^%d entries per level\n",
+				        hm.p_d, hm.p_levels, hm.p_features, hm.p_log2_T);
+			return e.release();
+		}
 		// CYCLES_NRC_LOAD: the file's model (encoding, network, loss, optimizer) replaces the defaults; the caller's
 		// config below may still set "nrc" (workspace) and "engine", but not the model, which must match the weights.
 		const char* load_path = getenv("CYCLES_NRC_LOAD");
@@ -423,17 +464,12 @@ extern "C" NrcEngine* nrc_create(const char* json_config, void* cu_stream) {
 			load_header = read_state(load_path, &load_blob);
 			for (auto it = load_header["config"].begin(); it != load_header["config"].end(); ++it) e->config[it.key()] = it.value();
 		}
-		if (json_config && json_config[0]) {
-			json user = json::parse(json_config);
-			for (auto it = user.begin(); it != user.end(); ++it) {
-				if (it.key() == "nrc") e->config["nrc"].update(it.value());  // "engine" is a top-level key too
-				else if (load_path && *load_path && it.key() != "engine" && it.key() != "optimizer" && it.key() != "loss") continue;  // model (encoding, network) comes from the file
-				else e->config[it.key()] = it.value();
-			}
+		for (auto it = user.begin(); it != user.end(); ++it) {
+			if (it.key() == "nrc") e->config["nrc"].update(it.value());  // "engine" is a top-level key too
+			else if (load_path && *load_path && it.key() != "engine" && it.key() != "optimizer" && it.key() != "loss") continue;  // model (encoding, network) comes from the file
+			else e->config[it.key()] = it.value();
 		}
 
-		cudaStream_t stream = (cudaStream_t)cu_stream;
-		e->create_stream = stream;
 		auto model = create_from_config(N_USED, N_OUT, e->config);
 		e->loss = model.loss;
 		e->optimizer = model.optimizer;
@@ -521,9 +557,10 @@ extern "C" void nrc_destroy(NrcEngine* e) {
 			fprintf(stderr, "cycles_nrc: dumped %llu records\n", (unsigned long long)e->n_dumped);
 		}
 		cudaStream_t s = e->create_stream;
+		const bool tcnn_arena = !e->frozen_infer;
 		delete e;
 		// Release the workspace arena tcnn keeps per stream (it would otherwise live until process exit).
-		free_gpu_memory_arena(s);
+		if (tcnn_arena) free_gpu_memory_arena(s);
 	} catch (const std::exception& ex) {
 		report("nrc_destroy", ex);
 	}
@@ -532,6 +569,7 @@ extern "C" void nrc_destroy(NrcEngine* e) {
 // ---- Test-only accessors (cycles_nrc_debug.h; not part of the Cycles ABI) ----
 
 extern "C" int nrc_debug_params(NrcEngine* e, int inference, void* host_fp16, size_t capacity) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	try {
 		CtxGuard g{e->ctx};
 		const size_t n = e->network->n_params();
@@ -548,6 +586,7 @@ extern "C" int nrc_debug_params(NrcEngine* e, int inference, void* host_fp16, si
 }
 
 extern "C" int nrc_debug_layout(NrcEngine* e, int* n_network_params, int* encoding_width, int* padded_output_width) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	*n_network_params = (int)e->network->n_params() - (int)e->network->encoding()->n_params();
 	*encoding_width = (int)e->network->encoding()->padded_output_width();
 	*padded_output_width = (int)e->network->padded_output_width();
@@ -562,6 +601,7 @@ extern "C" const char* nrc_debug_config(NrcEngine* e) {
 
 // Runs only the input encoding on n queries and copies the padded encoding (row j = query j) to host as float.
 extern "C" int nrc_debug_encode(NrcEngine* e, int n, const void* d_inputs, float* host_out, void* cu_stream) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	try {
 		CtxGuard g{e->ctx};
 		cudaStream_t stream = (cudaStream_t)cu_stream;
@@ -587,6 +627,7 @@ extern "C" int nrc_debug_encode(NrcEngine* e, int n, const void* d_inputs, float
 
 // tcnn's inference on the same EMA weights, whatever the selected engine (exactness checks and A/B timing).
 extern "C" int nrc_debug_infer_tcnn(NrcEngine* e, int n, const void* d_inputs, float* d_rgb, void* cu_stream) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	try {
 		CtxGuard g{e->ctx};
 		if (n > 0) e->infer_tcnn((cudaStream_t)cu_stream, (uint32_t)n, (const __half*)d_inputs, d_rgb);
@@ -599,7 +640,10 @@ extern "C" int nrc_debug_infer_tcnn(NrcEngine* e, int n, const void* d_inputs, f
 
 extern "C" const char* nrc_debug_engine(NrcEngine* e) {
 	static thread_local std::string s;
-	if (!e->fused) s = "tcnn";
+	if (e->frozen_infer) s = "infer w=" + std::to_string(e->iplan.width) + " d=" + std::to_string(e->iplan.depth) +
+	                         (e->iplan.fp8 ? " fp8" : " fp16") + " nc=" + std::to_string(e->iplan.nc) +
+	                         (e->iplan.encoding == nrcw::ENC_PERMUTO ? " enc=permuto" + std::to_string(e->iplan.p_d) : "");
+	else if (!e->fused) s = "tcnn";
 	else
 		s = std::string{e->plan.core == nrc_fused::CORE_WGMMA ? "wgmma" : "mma"} + " wg=" + std::to_string(e->plan.wg) +
 		    " ctas_per_sm=" + std::to_string(e->plan.blocks_per_sm) + " grid=" + std::to_string(e->plan.grid) +
@@ -611,6 +655,7 @@ extern "C" const char* nrc_debug_engine(NrcEngine* e) {
 // ---- Bake API (nrc-bake; analysis/nrc_bake.md). Not used by Cycles. ----
 
 extern "C" int nrc_save(NrcEngine* e, const char* path, int with_optimizer) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	try {
 		CtxGuard g{e->ctx};
 		save_state(*e, path, with_optimizer != 0);
@@ -622,6 +667,7 @@ extern "C" int nrc_save(NrcEngine* e, const char* path, int with_optimizer) {
 }
 
 extern "C" int nrc_set_learning_rate(NrcEngine* e, float lr) {
+	if (!e->network) return -1;  // engine infer has no tcnn model
 	e->optimizer->set_learning_rate(lr);
 	return 0;
 }
