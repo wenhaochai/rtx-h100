@@ -25,5 +25,8 @@ if "scr" in s:
     c.scrambling_distance = s["scr"]
 if "lt" in s:
     c.light_sampling_threshold = max(c.light_sampling_threshold, s["lt"])
+# 4. SCRAMBLING=<d>: scrambling distance d on every scene, for cubins built with the same SCRAMBLING (build_cubins.sh)
+if os.environ.get("SCRAMBLING"):
+    c.scrambling_distance = float(os.environ["SCRAMBLING"])
 print(f"scene_settings {scene}: scrambling={c.scrambling_distance} light_threshold={c.light_sampling_threshold} "
       f"glossy={c.glossy_bounces}", flush=True)
