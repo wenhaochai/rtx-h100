@@ -1,8 +1,9 @@
 """Offline bake of one scene's radiance cache from dumped training records (nrc/bake/dump.sh), each record used once.
-Writes an NRCBAKE1 file for the nrc engine (--enc hash) or an NRCINF1 file for engine infer (--enc permuto5);
-calibrate either with nrc/bake/calibrate.sh.
+Writes an NRCBAKE1 file for the nrc engine (--enc hash) or an NRCINF1 file for engine infer (--enc permuto5, or
+--enc hash --nrcinf); calibrate either with nrc/bake/calibrate.sh.
 
   bake_stream.py --dump <dir with s61.rec .. s69.rec> --out <dir>/bake.nrc [--config nrc/configs/t24.json] [--enc permuto5]
+  bake_stream.py --dump <dir> --files 's*.rec' --epochs 4 --nrcinf --out <dir>/bake.nrc     (nrc-scatter, dump_scatter.sh)
 
 Model: as configs/t24.json and the engine: the t24 hash grid (16 levels x 2 features, 2^24 entries per level,
 resolution 128 to 2048) on position, one-blob (4 bins) on direction, normal and roughness, identity on the albedos,
@@ -18,6 +19,10 @@ direction, x[0:5]: 5 levels x 8 features, 2^23 entries per level, hash-grid-equi
 position and 4 to 64 on direction. One-blob on normal and roughness and identity on the albedos as before:
 40 + 12 + 6 = 58 features, padded with ones to 64. Same MLP and training; the table gradient is one fp32 vector atomic
 per lattice vertex.
+
+--files picks the dump files in --dump (default s6[1-9].rec, which must be nine). --epochs k passes k times over them,
+each pass with its own shuffled call order; the learning-rate, beta2 and weight-average schedules span all passes.
+--nrcinf writes the hash model as an NRCINF1 file for engine infer (the grid levels as trained in the header).
 """
 import argparse, glob, json, math, os, queue, struct, sys, threading, time
 
@@ -115,7 +120,7 @@ def calls_of(path):
     return out
 
 
-def producer(files, buf_records, q, seed):
+def producer(files, buf_records, q, seed, put_end=True):
     """Host buffers of about buf_records records, from whole calls of all files in a shuffled order."""
     rng = np.random.default_rng(seed)
     order = [(i, c) for i, p in enumerate(files) for c in calls_of(p)]
@@ -131,7 +136,7 @@ def producer(files, buf_records, q, seed):
             q.put((np.concatenate(xs), np.concatenate(ys))); xs, ys, k = [], [], 0
     if xs:
         q.put((np.concatenate(xs), np.concatenate(ys)))
-    q.put(None)
+    if put_end: q.put(None)
 
 
 def pack_msgpack(d):
@@ -178,6 +183,21 @@ def write_nrcinf(path, hdr, sections):
     os.replace(path + ".tmp", path)
 
 
+def export_hash(path, net, width, depth, meta):
+    """NRCINF1 fp16 file of a hash model for engine infer. Grid levels: [scale, resolution, entries, offset, dense] as
+    trained; table row of a sparse level = offset + (tcnn's spatial hash & (2^log2_hashmap - 1))."""
+    g = net.grid
+    hdr = {"format": 1, "width": width, "depth": depth, "act": "relu", "out_act": "linear", "precision": "fp16",
+           "grid": {"n_levels": len(g.res), "n_features": int(g.table.shape[1]), "log2_hashmap": 24, "base_resolution": 128,
+                    "per_level_scale": 1.203025, "n_entries": g.n_entries,
+                    "levels": [[float(np.float32(sc)), int(r), int(sz), int(of), bool(dn)]
+                               for sc, r, sz, of, dn in zip(g.scale, g.res, g.size, g.offset, g.dense)]},
+           "meta": meta}
+    lay = [p.detach().half().cpu().numpy() for p in net.mlp.layers]
+    write_nrcinf(path, hdr, [("grid", g.table.detach().half().cpu().numpy()), ("w0", lay[0]),
+                             ("hidden", np.stack(lay[1:depth])), ("out", lay[depth])])
+
+
 def export_permuto(path, net, width, depth, meta):
     """NRCINF1 fp16 file of a --enc permuto5 model for engine infer. Per level l and dim j the lattice coordinate is
     (x_j + shift[l][j]) * scale[l][j] (fp32, the grid's buffers); the d+1 vertex keys are hashed as h = (h + key_j) *
@@ -202,6 +222,9 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", required=True, help="dir with s61.rec .. s69.rec")
+    ap.add_argument("--files", default="s6[1-9].rec", help="dump files in --dump (glob)")
+    ap.add_argument("--epochs", type=int, default=1, help="passes over the dump files")
+    ap.add_argument("--nrcinf", action="store_true", help="--enc hash: write NRCINF1 for engine infer")
     ap.add_argument("--out", required=True, help="output NRCBAKE1 file")
     ap.add_argument("--config", default=os.path.join(here, "..", "..", "configs", "t24.json"))
     ap.add_argument("--batch", type=int, default=1 << 18)
@@ -217,9 +240,9 @@ def main():
     assert net_cfg["otype"] == "FullyFusedMLP" and net_cfg["activation"] == "ReLU", net_cfg
     config = {k: model[k] for k in ("encoding", "network", "optimizer")}
     config["loss"] = {"otype": "L2"}
-    files = sorted(glob.glob(f"{a.dump}/s6[1-9].rec"))
-    assert len(files) == 9, files
-    total = sum(n for p in files for _, n in calls_of(p))
+    files = sorted(glob.glob(f"{a.dump}/{a.files}"))
+    assert files and (len(files) == 9 or a.files != "s6[1-9].rec"), files
+    total = sum(n for p in files for _, n in calls_of(p)) * a.epochs
     if a.max_records: total = min(total, int(a.max_records))
     steps = total // a.batch
     print(f"{len(files)} dump files, {total} records, {steps} steps", flush=True)
@@ -232,7 +255,10 @@ def main():
     opt = torch.optim.Adam(params, lr=a.lr, betas=(0.9, 0.999), eps=1e-15, fused=True)
     warm = max(1, steps // 50)
     q = queue.Queue(maxsize=3)
-    threading.Thread(target=producer, args=(files, a.buffer, q, 0), daemon=True).start()
+    def passes():
+        for e in range(a.epochs):   # pass 0 has seed 0, the single-pass order
+            producer(files, a.buffer, q, e, put_end=e + 1 == a.epochs)
+    threading.Thread(target=passes, daemon=True).start()
     s, t0 = 0, time.time()
     while s < steps:
         item = q.get()
@@ -259,7 +285,10 @@ def main():
                 print(f"step {s}/{steps} loss {float(loss):.4g} lr {opt.param_groups[0]['lr']:.3g} {time.time() - t0:.0f} s", flush=True)
         del X, Y, perm
     meta = {"trainer": "nrc/bake/stream/bake_stream.py", "records": s * a.batch, "dump": os.path.basename(os.path.normpath(a.dump))}
-    if a.enc == "hash":
+    if a.epochs > 1: meta["epochs"] = a.epochs
+    if a.enc == "hash" and a.nrcinf:
+        export_hash(a.out, ema, W, D, dict(meta, enc=a.enc, steps=s, batch=a.batch, lr=a.lr, lr_end=a.lr_end))
+    elif a.enc == "hash":
         write_bake(a.out, ema, config, s, meta)
     else:
         export_permuto(a.out, ema, W, D, dict(meta, enc=a.enc, steps=s, batch=a.batch, lr=a.lr, lr_end=a.lr_end))

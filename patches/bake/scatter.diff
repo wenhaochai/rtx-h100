@@ -1,0 +1,428 @@
+The bake tree of the nrc-scatter caches: patches/bake/kernel.diff, then this patch (kernel_tree.sh <checkout> <out> bake-scatter).
+1. The nrc2 variants of the render tree (patches/kernel/09-mergeN.diff), among them the scattered form of the cache
+   query (NRC2_SCATTER = -DNRC2_FLAGS_C=1): a path stashes or queries a vertex before its bounce, with the direction
+   towards the previous vertex, and the target is the radiance the vertex scatters that way.
+2. Grouped training samples (-DNRC_GROUP_N=N): N consecutive samples of a pixel are tagged together and share one
+   camera sample, so they reach the same first vertex; nrc_stash writes the group key into the record's padding word.
+
+diff --git a/intern/cycles/kernel/integrator/init_from_camera.h b/intern/cycles/kernel/integrator/init_from_camera.h
+--- a/intern/cycles/kernel/integrator/init_from_camera.h
++++ b/intern/cycles/kernel/integrator/init_from_camera.h
+@@ -95,7 +95,14 @@
+   /* Generate camera ray. */
+   Ray ray;
+   int cache_miss = 0;
+-  Spectrum T = integrate_camera_sample(kg, sample, x, y, rng_pixel, &ray, cache_miss);
++#if defined(CYCLES_NRC) && defined(NRC_GROUP_N)
++  const int sample_cam = nrc_group_tagged(INTEGRATOR_STATE(state, path, render_pixel_index), uint(sample)) ?
++                             sample - sample % NRC_GROUP_N :
++                             sample;
++#else
++  const int sample_cam = sample;
++#endif
++  Spectrum T = integrate_camera_sample(kg, sample_cam, x, y, rng_pixel, &ray, cache_miss);
+   if (cache_miss) {
+     if (tile != nullptr) {
+       integrator_path_init(state, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
+diff --git a/intern/cycles/kernel/integrator/nrc.h b/intern/cycles/kernel/integrator/nrc.h
+--- a/intern/cycles/kernel/integrator/nrc.h
++++ b/intern/cycles/kernel/integrator/nrc.h
+@@ -24,6 +24,57 @@
+ 
+ CCL_NAMESPACE_BEGIN
+ 
++/* nrc2 variants (analysis/nrc_bias.md). Compile-time NRC2_FLAGS_C / NRC2_PARAM_C, else at run time from the two
++ * stub-only fields (CYCLES_NRC_STUB_DIR = flags, CYCLES_NRC_STUB_RES = packed parameters), which an engine run does
++ * not read. Packed parameter: q% + 100 * tau10 + 1e4 * (burn-in / 8) + 1e6 * (rmin / 0.05). */
++#  define NRC2_SCATTER 1 /* cache the scattered radiance at the vertex (before the bounce) */
++#  define NRC2_DEMOD 2   /* targets / (diffuse + specular albedo), prediction x the same */
++#  define NRC2_X1GATE 4  /* at x1 end only after a diffuse bounce or roughness >= 0.25, ignoring the spread */
++#  define NRC2_VGATE 8   /* end only in cells whose target relative variance <= tau */
++#  define NRC2_RR 16     /* end with probability q, else continue and never end later */
++#  define NRC2_RR_CV 32  /* RR, unbiased: continuing paths x 1/(1-q), minus q/(1-q) x cache */
++#  define NRC2_BURNIN 64 /* no ending while sample < burn-in */
++#  define NRC2_STUBMIN 128 /* stub cache: end only in cells with >= q% (the q field) training records */
++#  ifdef NRC2_FLAGS_C
++#    define nrc2_flags() (NRC2_FLAGS_C)
++#    define nrc2_param() (NRC2_PARAM_C)
++#  else
++#    define nrc2_flags() (kernel_nrc.stub_dir)
++#    define nrc2_param() (kernel_nrc.stub_res)
++#  endif
++#  define nrc2_q() (float(nrc2_param() % 100) * 0.01f)
++#  define nrc2_tau() (float((nrc2_param() / 100) % 100) * 0.1f)
++#  define nrc2_burnin() (((nrc2_param() / 10000) % 100) * 8)
++#  define nrc2_rmin() (float((nrc2_param() / 1000000) % 100) * 0.05f)
++
++/* Variance gate table: per cell (position 32^3 x normal 4 x 4), sum w, sum w y, sum w y^2, count; y = target
++ * luminance, w = record throughput. Static device memory, zero at module load (one render per process). */
++#  define NRC2_GATE_LOG2 20
++#  ifdef __KERNEL_GPU__
++__device__ float nrc2_gate_tab[(1 << NRC2_GATE_LOG2) * 4];
++#  endif
++
++ccl_device_inline uint nrc2_gate_cell(const float px, const float py, const float pz, const float nt, const float np)
++{
++  const int ix = clamp(int(px * 32.0f), 0, 31), iy = clamp(int(py * 32.0f), 0, 31),
++            iz = clamp(int(pz * 32.0f), 0, 31);
++  const int n = clamp(int(nt * 4.0f), 0, 3) * 4 + clamp(int(np * 4.0f), 0, 3);
++  return hash_uint3(uint(ix) | (uint(n) << 8), uint(iy), uint(iz)) & ((1u << NRC2_GATE_LOG2) - 1u);
++}
++
++ccl_device_inline bool nrc2_gate_ok(const uint cell)
++{
++  const ccl_global float *t = nrc2_gate_tab + 4 * (size_t)cell;
++  const float w = t[0], m1 = t[1], m2 = t[2], n = t[3];
++  return n >= 32.0f && m1 > 0.0f && m2 * w <= (1.0f + nrc2_tau()) * m1 * m1;
++}
++
++/* Demodulation factor of a feature row, channel c: diffuse + specular albedo, at least 0.02. */
++ccl_device_forceinline float nrc2_albedo(const ccl_global unsigned short *f, const int c)
++{
++  return fmaxf(half_to_float(f[8 + c]) + half_to_float(f[11 + c]), 0.02f);
++}
++
+ ccl_device_forceinline ccl_global float *nrc_bin(const int slot, const int k)
+ {
+   return kernel_nrc.slot_bins + ((size_t)slot * CYCLES_NRC_NV + k) * 3;
+@@ -38,6 +89,24 @@
+   }
+ }
+ 
++/* Grouped training samples (-DNRC_GROUP_N=N, dump cubins only): the samples s of a pixel with the same s / N form a
++ * group. The group is tagged as a whole (hash of pixel and s / N), and its N paths share the camera sample of the
++ * group's first sample (filter, lens and time dimensions; init_from_camera), so they reach the same first vertex x1;
++ * all later dimensions keep their own sample index, so the N paths take independent BSDF samples at x1 (stratified with
++ * Sobol). nrc_stash writes the group key into the record's padding features 14-15 (unused by the engine and the
++ * offline trainer: N_USED = 14), and the host averages the targets of records with the same key and features. */
++#  ifdef NRC_GROUP_N
++ccl_device_forceinline bool nrc_group_tagged(const uint pixel, const uint sample)
++{
++  return kernel_nrc.enabled && kernel_nrc.ctrl->train &&
++         hash_uint2(pixel, sample / uint(NRC_GROUP_N)) < kernel_nrc.train_threshold;
++}
++ccl_device_forceinline uint nrc_group_key(const uint pixel, const uint sample)
++{
++  return 0x80000000u | ((pixel & 0x7fffffu) << 8) | ((sample / uint(NRC_GROUP_N)) & 0xffu);
++}
++#  endif
++
+ /* init_from_camera, after the path is set up and queued. */
+ ccl_device_inline void nrc_path_begin(const int state, const uint pixel, const uint sample)
+ {
+@@ -47,7 +116,11 @@
+   kernel_nrc.main_spread[2 * state + 0] = 0.0f;
+   kernel_nrc.main_spread[2 * state + 1] = 0.0f;
+   int slot = -1;
++#  ifdef NRC_GROUP_N
++  if (nrc_group_tagged(pixel, sample)) {
++#  else
+   if (kernel_nrc.ctrl->train && hash_uint2(pixel, sample) < kernel_nrc.train_threshold) {
++#  endif
+     const int h = int(atomicAdd(&kernel_nrc.ctrl->slot_head, 1u) % uint(kernel_nrc.num_slots));
+     if (atomicCAS(&kernel_nrc.slots[h].status, NRC_SLOT_FREE, NRC_SLOT_ACTIVE) == NRC_SLOT_FREE) {
+       kernel_nrc.slots[h].ref = 1;
+@@ -190,10 +263,24 @@
+         copies = min(int(Tm / tau + u), 16);
+       }
+     }
+-    const float3 tf = ensure_finite(t);
++    float3 tf = ensure_finite(t);
+     const ccl_global uint4 *src = (const ccl_global uint4 *)(kernel_nrc.slot_feat +
+                                                              ((size_t)slot * CYCLES_NRC_NV + k) *
+                                                                  NRC_IN_FEATURES);
++    const ccl_global unsigned short *fs = (const ccl_global unsigned short *)src;
++    if (nrc2_flags() & NRC2_DEMOD) {
++      tf = make_float3(tf.x / nrc2_albedo(fs, 0), tf.y / nrc2_albedo(fs, 1), tf.z / nrc2_albedo(fs, 2));
++    }
++    if (nrc2_flags() & NRC2_VGATE) {
++      const uint cell = nrc2_gate_cell(half_to_float(fs[0]), half_to_float(fs[1]), half_to_float(fs[2]),
++                                       half_to_float(fs[5]), half_to_float(fs[6]));
++      const float y = 0.2126f * tf.x + 0.7152f * tf.y + 0.0722f * tf.z;
++      ccl_global float *g = nrc2_gate_tab + 4 * (size_t)cell;
++      atomicAdd(g + 0, Tm);
++      atomicAdd(g + 1, Tm * y);
++      atomicAdd(g + 2, Tm * y * y);
++      atomicAdd(g + 3, 1.0f);
++    }
+     for (int j = 0; j < copies; j++) {
+       const unsigned int r = atomicAdd(&kernel_nrc.ctrl->record_count, 1u);
+       if (r >= (unsigned int)kernel_nrc.record_cap) {
+@@ -219,6 +306,10 @@
+   const NRCQueryMeta m = kernel_nrc.query_meta[i];
+   const ccl_global float *o = kernel_nrc.query_out + (size_t)i * 3;
+   float3 L = make_float3(m.r * fmaxf(o[0], 0.0f), m.g * fmaxf(o[1], 0.0f), m.b * fmaxf(o[2], 0.0f));
++  if (nrc2_flags() & NRC2_DEMOD) {
++    const ccl_global unsigned short *f = kernel_nrc.query_in + (size_t)i * NRC_IN_FEATURES;
++    L = make_float3(L.x * nrc2_albedo(f, 0), L.y * nrc2_albedo(f, 1), L.z * nrc2_albedo(f, 2));
++  }
+   L = ensure_finite(L);
+   if (is_zero(L)) {
+     return;
+diff --git a/intern/cycles/kernel/integrator/nrc_types.h b/intern/cycles/kernel/integrator/nrc_types.h
+--- a/intern/cycles/kernel/integrator/nrc_types.h
++++ b/intern/cycles/kernel/integrator/nrc_types.h
+@@ -71,8 +71,7 @@
+   int budget_feature; /* 1: features 14, 15 = remaining diffuse / glossy bounces (min with total) / 8 */
+   int train_match;    /* 1: a training path stashes only the vertex where a normal path would have ended */
+   int train_weight;   /* 1: write each record floor(mean(T) / tau + u) times (throughput-weighted regression) */
+-  int diffuse_only;   /* nrc-bake: 1 = a path may end only after a diffuse bounce (label & LABEL_DIFFUSE) */
+-  int pad[1];
++  int pad[2];
+ 
+   /* Device arrays. */
+   ccl_global NRCControl *ctrl;
+diff --git a/intern/cycles/kernel/integrator/shade_surface.h b/intern/cycles/kernel/integrator/shade_surface.h
+--- a/intern/cycles/kernel/integrator/shade_surface.h
++++ b/intern/cycles/kernel/integrator/shade_surface.h
+@@ -843,10 +843,118 @@
+   return make_float2(S, a0);
+ }
+ 
+-/* After the bounce: a training path stashes the vertex; another path may end here, writing a query whose
+- * answer (incident radiance along the sampled direction) the resolve kernel adds to the Combined pass times the
+- * throughput after the bounce. Returns true when the path ends. */
+-ccl_device_noinline bool nrc_after_bounce(ConstIntegratorState state,
++/* Writes one query (features with direction wo, throughput weight T) and returns false when the buffer is full. */
++ccl_device_forceinline bool nrc_write_query(ConstIntegratorState state,
++                                            const ccl_private ShaderData *sd,
++                                            const float3 wo,
++                                            const Spectrum T)
++{
++  const unsigned int q = atomicAdd(&kernel_nrc.ctrl->query_count, 1u);
++  if (q >= (unsigned int)kernel_nrc.query_cap) {
++    atomicAdd(&kernel_nrc.ctrl->dropped_queries, 1u);
++    return false;
++  }
++  nrc_write_features(state, sd, wo, kernel_nrc.query_in + (size_t)q * NRC_IN_FEATURES);
++  NRCQueryMeta m;
++  m.pixel = INTEGRATOR_STATE(state, path, render_pixel_index);
++  m.r = T.x;
++  m.g = T.y;
++  m.b = T.z;
++  kernel_nrc.query_meta[q] = m;
++  return true;
++}
++
++/* A non-training path at a vertex where it may end (nrc2 flags: burn-in, variance gate, roulette). wo: the
++ * direction feature; the query weight is the current throughput. Returns true when the path ends. */
++ccl_device_noinline bool nrc_try_end(IntegratorState state,
++                                     const ccl_private ShaderData *sd,
++                                     const float3 wo,
++                                     const int k)
++{
++  const int flags = nrc2_flags();
++  if ((flags & NRC2_BURNIN) && int(INTEGRATOR_STATE(state, path, sample)) < nrc2_burnin()) {
++    return false;
++  }
++  if (flags & NRC2_VGATE) {
++    const float2 dn = nrc_sph(sd->N);
++    const uint cell = nrc2_gate_cell(
++        saturatef((sd->P.x - kernel_nrc.box_lo[0]) * kernel_nrc.box_scale[0]),
++        saturatef((sd->P.y - kernel_nrc.box_lo[1]) * kernel_nrc.box_scale[1]),
++        saturatef((sd->P.z - kernel_nrc.box_lo[2]) * kernel_nrc.box_scale[2]),
++        dn.x,
++        dn.y);
++    if (!nrc2_gate_ok(cell)) {
++      return false;
++    }
++  }
++  const Spectrum T = INTEGRATOR_STATE(state, path, throughput);
++  if (flags & (NRC2_RR | NRC2_RR_CV)) {
++    const float q = nrc2_q();
++    const float u = float(hash_uint3(INTEGRATOR_STATE(state, path, render_pixel_index),
++                                     INTEGRATOR_STATE(state, path, sample),
++                                     uint(k) ^ 0x5bd1e995u) >>
++                          8) *
++                    (1.0f / 16777216.0f);
++    if (u >= q) {
++      /* Continue, and never end later: one roulette per path. */
++      ccl_global float *sp = kernel_nrc.main_spread + 2 * state;
++      sp[1] = -fabsf(sp[1]);
++      if (flags & NRC2_RR_CV) {
++        /* Y = C + [continue] / (1 - q) * (L - C): E[Y] = L. */
++        const float inv = 1.0f / (1.0f - q);
++        if (nrc_write_query(state, sd, wo, T * (-q * inv))) {
++          INTEGRATOR_STATE_WRITE(state, path, throughput) = T * inv;
++        }
++      }
++      return false;
++    }
++  }
++  if (flags & NRC2_STUBMIN) {
++    /* The query is written first (features in place), then voided and the path continues when its stub cell has
++     * too few records: an empty cell would answer 0. */
++    const unsigned int q = atomicAdd(&kernel_nrc.ctrl->query_count, 1u);
++    if (q >= (unsigned int)kernel_nrc.query_cap) {
++      atomicAdd(&kernel_nrc.ctrl->dropped_queries, 1u);
++      return false;
++    }
++    ccl_global unsigned short *f = kernel_nrc.query_in + (size_t)q * NRC_IN_FEATURES;
++    nrc_write_features(state, sd, wo, f);
++    const bool ok = kernel_nrc.stub_table[(size_t)nrc_stub_cell(f) * 8 + 6] >= float(nrc2_param() % 100);
++    NRCQueryMeta m;
++    m.pixel = INTEGRATOR_STATE(state, path, render_pixel_index);
++    m.r = ok ? T.x : 0.0f;
++    m.g = ok ? T.y : 0.0f;
++    m.b = ok ? T.z : 0.0f;
++    kernel_nrc.query_meta[q] = m;
++    return ok;
++  }
++  return nrc_write_query(state, sd, wo, T);
++}
++
++/* Training path: stash vertex k (features with direction wo, throughput now). */
++ccl_device_forceinline void nrc_stash(ConstIntegratorState state,
++                                      const ccl_private ShaderData *sd,
++                                      const float3 wo,
++                                      const int slot,
++                                      const int k)
++{
++  const size_t v = (size_t)slot * CYCLES_NRC_NV + k;
++  nrc_write_features(state, sd, wo, kernel_nrc.slot_feat + v * NRC_IN_FEATURES);
++#  ifdef NRC_GROUP_N
++  ((ccl_global uint *)(kernel_nrc.slot_feat + v * NRC_IN_FEATURES))[7] = nrc_group_key(
++      INTEGRATOR_STATE(state, path, render_pixel_index), INTEGRATOR_STATE(state, path, sample));
++#  endif
++  const Spectrum T = INTEGRATOR_STATE(state, path, throughput);
++  kernel_nrc.slot_T[v * 3 + 0] = T.x;
++  kernel_nrc.slot_T[v * 3 + 1] = T.y;
++  kernel_nrc.slot_T[v * 3 + 2] = T.z;
++  kernel_nrc.slots[slot].mask |= (1u << k);
++}
++
++/* Incident form, after the bounce: a training path stashes the vertex; another path may end here, writing a query
++ * whose answer (incident radiance along the sampled direction) the resolve kernel adds to the Combined pass times
++ * the throughput after the bounce. Returns true when the path ends. */
++ccl_device_noinline bool nrc_after_bounce(IntegratorState state,
+                                           const ccl_private ShaderData *sd,
+                                           const int label,
+                                           const float2 spread)
+@@ -857,46 +965,87 @@
+     return false;
+   }
+   const int k = INTEGRATOR_STATE(state, path, bounce);
++  bool spread_ok = spread.y > 0.0f && spread.x * spread.x >= kernel_nrc.c * spread.y;
++  if ((nrc2_flags() & NRC2_X1GATE) && k == 1) {
++    spread_ok = spread.y > 0.0f &&
++                ((label & LABEL_DIFFUSE) || surface_shader_average_roughness(sd) >= 0.25f);
++  }
+   /* Would a normal path end here (warm-up flag and buffer space aside)? */
+   const bool end_here = k >= kernel_nrc.min_bounce &&
+-                        !(kernel_nrc.skip_singular && (label & LABEL_SINGULAR)) &&
+-                        !(kernel_nrc.diffuse_only && !(label & LABEL_DIFFUSE)) &&
+-                        spread.x * spread.x >= kernel_nrc.c * spread.y &&
++                        !(kernel_nrc.skip_singular && (label & LABEL_SINGULAR)) && spread_ok &&
+                         !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SHADOW_CATCHER_PASS);
+   const int slot = kernel_nrc.main_slot[state];
+   if (slot >= 0) {
+     if (k >= 1 && k < CYCLES_NRC_NV &&
+         (!kernel_nrc.train_match || (end_here && kernel_nrc.slots[slot].mask == 0)))
+     {
+-      const size_t v = (size_t)slot * CYCLES_NRC_NV + k;
+-      nrc_write_features(
+-          state, sd, INTEGRATOR_STATE(state, ray, D), kernel_nrc.slot_feat + v * NRC_IN_FEATURES);
+-      const Spectrum T = INTEGRATOR_STATE(state, path, throughput);
+-      kernel_nrc.slot_T[v * 3 + 0] = T.x;
+-      kernel_nrc.slot_T[v * 3 + 1] = T.y;
+-      kernel_nrc.slot_T[v * 3 + 2] = T.z;
+-      kernel_nrc.slots[slot].mask |= (1u << k);
++      nrc_stash(state, sd, INTEGRATOR_STATE(state, ray, D), slot, k);
+     }
+     return false;
+   }
+   if (!end_here || !kernel_nrc.ctrl->terminate) {
+     return false;
+   }
+-  const unsigned int q = atomicAdd(&kernel_nrc.ctrl->query_count, 1u);
+-  if (q >= (unsigned int)kernel_nrc.query_cap) {
+-    atomicAdd(&kernel_nrc.ctrl->dropped_queries, 1u);
++  return nrc_try_end(state, sd, INTEGRATOR_STATE(state, ray, D), k);
++}
++
++/* Scattered form, before the bounce (Mueller et al. 2021): the cache answers the radiance the vertex scatters
++ * towards the previous vertex through its BSDF (emission and NEE at the vertex stay exact), weighted by the
++ * throughput before the bounce. The decision may not depend on the sampled lobe, so a vertex qualifies by its
++ * closures: no BSSRDF, transparent or portal closure, and at most 10% of the BSDF weight in lobes with roughness
++ * below rmin. */
++ccl_device_inline bool nrc_cacheable(const ccl_private ShaderData *sd)
++{
++  const float rmin = nrc2_rmin();
++  float sharp = 0.0f, total = 0.0f;
++  for (int i = 0; i < sd->num_closure; i++) {
++    const ccl_private ShaderClosure *sc = &sd->closure[i];
++    if (CLOSURE_IS_BSSRDF(sc->type) || CLOSURE_IS_BSDF_SINGULAR(sc->type)) {
++      return false;
++    }
++    if (!CLOSURE_IS_BSDF(sc->type)) {
++      continue;
++    }
++    const float w = fabsf(average(sc->weight));
++    total += w;
++    if (!CLOSURE_IS_BSDF_DIFFUSE(sc->type)) {
++      const float r2 = bsdf_get_roughness_pass_squared(sc);
++      if (r2 >= 0.0f && sqrtf(sqrtf(r2)) < rmin) {
++        sharp += w;
++      }
++    }
++  }
++  return total > 0.0f && sharp <= 0.1f * total;
++}
++
++ccl_device_noinline bool nrc_before_bounce(IntegratorState state,
++                                           const ccl_private ShaderData *sd,
++                                           const float2 spread)
++{
++  const int k = INTEGRATOR_STATE(state, path, bounce) + 1;
++  if (k >= CYCLES_NRC_NV && kernel_nrc.main_slot[state] >= 0) {
+     return false;
+   }
+-  nrc_write_features(
+-      state, sd, INTEGRATOR_STATE(state, ray, D), kernel_nrc.query_in + (size_t)q * NRC_IN_FEATURES);
+-  const Spectrum T = INTEGRATOR_STATE(state, path, throughput);
+-  NRCQueryMeta m;
+-  m.pixel = INTEGRATOR_STATE(state, path, render_pixel_index);
+-  m.r = T.x;
+-  m.g = T.y;
+-  m.b = T.z;
+-  kernel_nrc.query_meta[q] = m;
+-  return true;
++  if (!nrc_cacheable(sd)) {
++    return false;
++  }
++  bool spread_ok = spread.y > 0.0f && spread.x * spread.x >= kernel_nrc.c * spread.y;
++  if ((nrc2_flags() & NRC2_X1GATE) && k == 1) {
++    spread_ok = spread.y > 0.0f;
++  }
++  const bool end_here = k >= kernel_nrc.min_bounce && spread_ok &&
++                        !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SHADOW_CATCHER_PASS);
++  const int slot = kernel_nrc.main_slot[state];
++  if (slot >= 0) {
++    if (!kernel_nrc.train_match || (end_here && kernel_nrc.slots[slot].mask == 0)) {
++      nrc_stash(state, sd, sd->wi, slot, k);
++    }
++    return false;
++  }
++  if (!end_here || !kernel_nrc.ctrl->terminate) {
++    return false;
++  }
++  return nrc_try_end(state, sd, sd->wi, k);
+ }
+ #endif /* CYCLES_NRC */
+ 
+@@ -1020,11 +1169,14 @@
+     float2 nrc_spread = zero_float2();
+     if (kernel_nrc.enabled) {
+       nrc_spread = nrc_spread_update(state, &sd);
++      if ((nrc2_flags() & NRC2_SCATTER) && nrc_before_bounce(state, &sd, nrc_spread)) {
++        return LABEL_NONE;
++      }
+     }
+ #endif
+     continue_path_label = integrate_surface_bsdf_bssrdf_bounce(kg, state, &sd, &rng_state);
+ #ifdef CYCLES_NRC
+-    if (kernel_nrc.enabled && continue_path_label != LABEL_NONE &&
++    if (kernel_nrc.enabled && !(nrc2_flags() & NRC2_SCATTER) && continue_path_label != LABEL_NONE &&
+         nrc_after_bounce(state, &sd, continue_path_label, nrc_spread))
+     {
+       return LABEL_NONE;

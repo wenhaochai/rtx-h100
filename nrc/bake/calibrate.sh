@@ -6,6 +6,7 @@
 # Env: as render.sh, plus ENGINE; RUNCFG (default run_wgmma.json for H100, run_mma.json on sm_86; an NRCINF1 bake from
 # bake_stream.py --enc permuto5 uses run_infer.json, and set_scale.py folds its scale into the output layer).
 # The project's c0 scales were 1.11, 1.08 and 1.24 (monster, junkshop, classroom).
+# nrc-scatter: BAKE_CUBINS = the grouped dump cubins (dump_scatter.sh), so A and Z use the scattered query.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); SC=${1:?scene}; S=$(cd "${2:?bake dir}" && pwd); export OUT=$S/cal; mkdir -p "$OUT"
 : "${ENGINE:?}"
