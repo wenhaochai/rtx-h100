@@ -7,6 +7,8 @@
 # configs/bake_cubins.sha256): the exact configuration plus the cache's training path.
 # SCATTER=1 builds the nrc-scatter cubins (configs/scatter_cubins.sha256): the nrc flags with -DNRC2_FLAGS_C=1, the
 # scattered form of the cache query, and the seed read at run time (the seed line dropped from kdata_const.h).
+# SEED=1 builds the nrc cubins with the seed read at run time (configs/nrc_seed_cubins.sha256); seed 0 renders the
+# image of the nrc cubins.
 set -euo pipefail
 K=${1:?kernel tree}; O=${2:?out dir}; shift 2; SCENES=("${@:-monster junkshop classroom}"); SCENES=(${SCENES[@]})
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -14,10 +16,11 @@ NVCC=${NVCC:-/usr/local/cuda-12.9/bin/nvcc}
 mkdir -p "$O"
 one() {
   local s=$1 cfg=$CFGS/$1 flags sub=() nvcc=$NVCC nvcc_extra=""
-  if [ "${SCATTER:-0}" = 1 ]; then
+  if [ "${SCATTER:-0}" = 1 ] || [ "${SEED:-0}" = 1 ]; then
     mkdir -p "$O/configs"; rm -rf "$O/configs/$s"; cp -r "$cfg" "$O/configs/$s"; cfg=$O/configs/$s
-    sed -i '/^  static constexpr int seed = 0;$/d' "$cfg/kdata_const.h"; sub=(-e 's#^-DNRC2_FLAGS_C=0$#-DNRC2_FLAGS_C=1#')
+    sed -i '/^  static constexpr int seed = 0;$/d' "$cfg/kdata_const.h"
   fi
+  if [ "${SCATTER:-0}" = 1 ]; then sub=(-e 's#^-DNRC2_FLAGS_C=0$#-DNRC2_FLAGS_C=1#'); fi
   mapfile -t flags < <(sed -e "s#@CFG@#$cfg#g" "${sub[@]}" "$cfg/${FLAGS:-nrc_nvcc_flags.txt}")   # one flag per line; quotes stay literal
   # per-scene toolchain (configs/pro6000/<scene>/<set>_toolchain.txt): NVCC=<nvcc> and NVCC_EXTRA=<options>
   local tc=$cfg/$(basename "${FLAGS:-nrc_nvcc_flags.txt}" _nvcc_flags.txt)_toolchain.txt
@@ -30,5 +33,5 @@ one() {
   echo "$(sha256sum "$O/$s.cubin" | cut -d' ' -f1)  $s.cubin"
 }
 CFGS=$(cd "${CONFIGS:-$HERE/configs}" && pwd)   # CONFIGS=configs/pro6000: the RTX PRO 6000 configuration (ARCH=sm_120)
-export -f one; export K O HERE NVCC FLAGS EXTRA SCATTER ARCH CFGS
+export -f one; export K O HERE NVCC FLAGS EXTRA SCATTER SEED ARCH CFGS
 printf '%s\n' "${SCENES[@]}" | xargs -P 3 -I{} bash -c 'one {}'
