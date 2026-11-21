@@ -55,7 +55,7 @@ The benchmark counts samples, and a cached sample does far less work than an exa
 
 `nrc-hq` lifts that ceiling. At 1,024 samples it reaches 35.3, 31.2 and 35.1 dB, against 32.8, 23.7 and 32.1 dB for `nrc`, and it still gets there 1.3, 1.1 and 1.8 times sooner than the exact build. At 256 samples it is 3.3, 2.5 and 4.9 times sooner. At the 32-sample bar it is slower than `nrc`, mainly on junkshop, which needs 32 samples instead of 20; the three scenes give 24.8 images per second against 28.6. The wider SiLU caches add up to 1.45 dB at 1,024 samples and cost up to 1.7 times the render time.
 
-`nrc-permuto` lifts it further with the same 64-wide network. At 1,024 samples it reaches 37.0, 32.6 and 37.1 dB, at or above the 256×6 SiLU cache in 0.6 to 0.7 times its render time. At the bar it is the slowest of the three published caches: an accurate cache keeps the variation of radiance inside a pixel, so at 32 samples its noise stays at the exact build's level, and junkshop needs 40 samples. The three scenes give 18.8 images per second. RECIPE.md section 5 has the bias and variance split.
+`nrc-permuto` lifts it further with the same 64-wide network. At 1,024 samples it reaches 37.0, 32.6 and 37.1 dB, at or above the 256×6 SiLU cache in 0.6 to 0.7 times its render time. At the bar it is the slowest of the three published caches: at 32 samples its noise on junkshop stays at the exact build's level, and junkshop needs 40 samples. The three scenes give 18.8 images per second. RECIPE.md section 5 has the bias and variance split.
 
 ## Reproduce
 
