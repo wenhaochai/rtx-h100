@@ -6,9 +6,9 @@
 
 <sub>Stock Blender and this build render the three benchmark scenes for the same 30 seconds on one H100.</sub>
 
-**A compute card can ray-trace like a graphics card.** On one NVIDIA H100, Blender 5.3.0 Cycles renders the Open Data benchmark at 48,641 samples per minute: 6.9 times stock Blender on the same card and 2.5 times an RTX 5090 with OptiX.
+**A compute card can ray-trace like a graphics card.** On one NVIDIA H100, Blender 5.3.0 Cycles renders the Open Data benchmark at 55,148 samples per minute: 7.8 times stock Blender on the same card and 2.9 times an RTX 5090 with OptiX.
 
-Exact per-scene kernel specialization gives the first 2.0 times. A per-scene baked neural radiance cache that ends every path at its first hit gives most of the rest. The result passes a 32-spp image bar at seed 0, the only seed its monster and junkshop kernels can render; the same cache on an earlier build misses the luminance limit on monster at seed 2. Wide BVHs, kernel concurrency and online cache training gave nothing. At the quality of an exact 32-spp render, `nrc` delivers 9.7 times as many images per second as stock Blender; its quality has a ceiling, above which the exact build is faster, and at low sample counts its mean brightness is off by 2 to 8%.
+Exact per-scene kernel specialization gives the first 2.0 times. A per-scene baked neural radiance cache that ends every path at its first hit gives most of the rest. The first release, `nrc` at 48,641, asked the cache for the light arriving along one sampled bounce direction. `nrc-scatter` asks it for the light the first hit scatters toward the camera, so no bounce is sampled, and trains it on targets that average eight samples at the same hit; that gives 13% more samples per minute and cuts the noise the cache adds. It passes the 32-spp image gate on all three scenes. Wide BVHs, kernel concurrency and online cache training gave nothing. At the quality of an exact 32-spp render, `nrc-scatter` delivers 13.7 times as many images per second as stock Blender at seed 0, against 9.7 for `nrc`; at those low sample counts its mean brightness is off by up to 16%, from a sampling setting all cache configurations share.
 
 ## Results
 
@@ -17,21 +17,23 @@ Exact per-scene kernel specialization gives the first 2.0 times. A per-scene bak
 | stock Blender 5.3.0 | 2,768 | 2,450 | 1,824 | 7,041 | reference |
 | RTX 5090, OptiX, Open Data median | | | | 19,202 | reference |
 | `exact`: specialized kernels, no approximation | 6,706 | 4,050 | 3,356 | 14,106 | equal to stock up to floating-point rounding |
-| **`nrc`: + baked neural radiance cache** | **20,275** | **13,319** | **15,047** | **48,641** | approximate, passes the image gate |
+| `nrc`: + baked neural radiance cache | 20,275 | 13,319 | 15,047 | 48,641 | approximate, passes the image gate |
 | `nrc-hq`: `nrc` with the offline-baked caches | 20,377 | 13,434 | 15,187 | 48,997 | approximate, passes the image gate |
 | `nrc-permuto`: caches on a lattice over position and direction | 19,087 | 13,318 | 13,979 | 46,385 | approximate, passes the image gate |
+| **`nrc-scatter`: the cache answers the light scattered at the first hit** | **23,367** | **15,375** | **16,406** | **55,148** | approximate, passes the image gate |
 
-One H100 SXM 80 GB, official benchmark protocol. Per-scene values are medians over 6 to 12 three-scene runs; totals are as the project reported them, so they can differ from the column sum by a few units. Rebuilt and re-measured from this repository, `nrc` scores 48,721 and passes the same gate, and `exact` scores 14,116 with the same image difference. `nrc-hq` runs the same model, engine and cubins with caches baked offline from the same exact renders; it was measured on another node, so its difference from `nrc` is node spread. Its gate PSNR is 36.17, 32.00 and 35.63 dB, against 33.05, 23.80 and 32.31 dB for `nrc`. `nrc-permuto` puts the outgoing direction into the cache's grid, a permutohedral lattice, and runs it on a second engine in the same library; measured on a third node, its gate PSNR is 38.30, 34.24 and 38.09 dB.
+One H100 SXM 80 GB, official benchmark protocol. Per-scene values are medians over 6 to 12 three-scene runs; totals are as the project reported them, so they can differ from the column sum by a few units. Rebuilt and re-measured from this repository, `nrc` scores 48,721 and passes the same gate, and `exact` scores 14,116 with the same image difference. `nrc-hq` runs the same model, engine and cubins with caches baked offline from the same exact renders; it was measured on another node, so its difference from `nrc` is node spread. Its gate PSNR is 36.17, 32.00 and 35.63 dB, against 33.05, 23.80 and 32.31 dB for `nrc`. `nrc-permuto` puts the outgoing direction into the cache's grid, a permutohedral lattice, and runs it on a second engine in the same library; measured on a third node, its gate PSNR is 38.30, 34.24 and 38.09 dB. `nrc-scatter` runs its own cubins and hash caches trained on averaged targets on that engine; measured on a fourth node, its gate PSNR is 41.03, 37.02 and 46.01 dB.
 
 | images per second at the 32-spp bar | monster | junkshop | classroom | total | vs stock |
 |---|---|---|---|---|---|
 | stock Blender 5.3.0, 32 spp | 1.27 | 1.01 | 0.67 | 2.95 | 1.0x |
 | `exact`, 32 spp | 2.68 | 1.57 | 1.07 | 5.32 | 1.8x |
-| **`nrc`, 20 / 20 / 24 spp** | **13.5** | **7.52** | **7.58** | **28.6** | **9.7x** |
+| `nrc`, 20 / 20 / 24 spp | 13.5 | 7.52 | 7.58 | 28.6 | 9.7x |
 | `nrc-hq`, 20 / 32 / 24 spp | 12.7 | 5.32 | 6.80 | 24.8 | 8.4x |
 | `nrc-permuto`, 24 / 40 / 24 spp | 8.75 | 3.61 | 6.48 | 18.8 | 6.4x |
+| **`nrc-scatter`, 16 / 4 / 20 spp** | **14.9** | **16.7** | **8.91** | **40.4** | **13.7x** |
 
-A sample of `nrc` does less work than a sample of stock Blender, so this table counts images instead: how many images per second reach the PSNR of an exact 32-spp render against the 65,536-spp reference, the gate's bar. Each value is one over the median render time of three seed-0 renders at the fewest samples that clear the bar, without scene load; `nrc`'s mean luminance at those counts is off by 2 to 8%.
+A sample of `nrc` does less work than a sample of stock Blender, so this table counts images instead: how many images per second reach the PSNR of an exact 32-spp render against the 65,536-spp reference, the gate's bar. Each value is one over the median render time of three seed-0 renders at the fewest samples that clear the bar, without scene load; `nrc`'s mean luminance at those counts is off by 2 to 8%, `nrc-scatter`'s by 9 to 16%. Over seeds 0 to 7 at the same counts, 7, 7 and 2 of 8 `nrc-scatter` images clear the bar; 4 more samples bring monster and classroom to 8 of 8.
 
 ## How it got there
 
@@ -42,20 +44,23 @@ A sample of `nrc` does less work than a sample of stock Blender, so this table c
 1. **Specialize the kernel to the scene, exactly.** Per-kernel launch bounds, the scene's own feature mask, eight times more paths in flight, a BVH traversal that refills idle lanes, and a shader interpreter with every unused node compiled out. The image stays equal to stock. 7,041 to 14,106.
 2. **Approximate the sampling.** Stronger Russian roulette, a light threshold, cheaper indirect bounces, then more exact work on top: compile-time scene constants, flat leaf triangles, per-material shading programs, and a per-cell radiance cache. 14,106 to 27,041.
 3. **Bake the lighting into a neural cache.** A hash grid and a small MLP per scene, trained offline on exact renders, frozen, and queried at the first hit of every camera path, where the path then ends. 27,041 to 48,641.
+4. **Cache the scattered light.** The cache answers the light the first hit scatters toward the camera instead of the light along one sampled bounce, and learns it from targets that average eight samples at the hit. 48,641 to 55,148.
 
 [RECIPE.md](RECIPE.md) has every step with its gain and image cost, the bake, the reproduction, and the fifteen ideas that failed.
 
 ## Samples per minute and image quality
 
-![PSNR against render time for three nrc caches, exact and stock Blender on the three scenes](assets/quality_time.png)
+![PSNR against render time for four nrc caches, exact and stock Blender on the three scenes](assets/quality_time.png)
 
-<sub>Seed-0 renders on one H100, PSNR against the 65,536-spp exact reference. The cache lines have points at 16, 64, 256 and 1,024 samples; `exact` at 32 to 512. `nrc` is the production cache, `nrc-hq` the offline-baked one, `nrc-permuto` the lattice cache. Render time is Cycles' render time without scene load, the median of three renders for every cache point and one render for `exact`. Stock Blender's time is the exact build's, scaled by the ratio of their samples per minute.</sub>
+<sub>Seed-0 renders on one H100, PSNR against the 65,536-spp exact reference. The cache lines have points at 16, 64, 256 and 1,024 samples; `exact` at 32 to 512. `nrc` is the production cache, `nrc-hq` the offline-baked one, `nrc-permuto` the lattice cache, `nrc-scatter` the scattered query on averaged targets. Render time is Cycles' render time without scene load, the median of three renders for every cache point and one render for `exact`. Stock Blender's time is the exact build's, scaled by the ratio of their samples per minute.</sub>
 
 The benchmark counts samples, and a cached sample does far less work than an exact one, so samples per minute overstate how fast a usable image appears. Measured as image quality against render time, `nrc` clears the PSNR bar at 20 to 24 samples, in 0.07 to 0.13 s: 4.8 to 7.1 times sooner than the exact build and 7.4 to 11.4 times sooner than stock Blender, which reach the bar at 32 samples. Its bias caps the quality near 33, 24 and 32 dB, so beyond about 1,000 samples the exact build gets there first and keeps improving; the benchmark score and the gate images both sit in that region. At those sample counts its mean luminance is off by 2 to 8%, past the gate's 0.5% limit, and the 9 to 18 minutes of baking per scene are not counted.
 
 `nrc-hq` lifts that ceiling. At 1,024 samples it reaches 35.3, 31.2 and 35.1 dB, against 32.8, 23.7 and 32.1 dB for `nrc`, and it still gets there 1.3, 1.1 and 1.8 times sooner than the exact build. At 256 samples it is 3.3, 2.5 and 4.9 times sooner. At the 32-sample bar it is slower than `nrc`, mainly on junkshop, which needs 32 samples instead of 20; the three scenes give 24.8 images per second against 28.6.
 
 `nrc-permuto` lifts it further with the same 64-wide network. At 1,024 samples it reaches 37.0, 32.6 and 37.1 dB, 1.7, 1.5 and 2.1 dB above `nrc-hq`. At the bar it is the slowest of the three published caches: at 32 samples its noise on junkshop stays at the exact build's level, and junkshop needs 40 samples. The three scenes give 18.8 images per second. RECIPE.md section 5 has the bias and variance split.
+
+`nrc-scatter` has the highest PSNR of the four caches at every sample count. At 1,024 samples it reaches 39.2, 35.7 and 42.0 dB, 2.2, 3.1 and 4.8 dB above `nrc-permuto`. At 256 samples it reaches 35.8, 32.1 and 36.5 dB in 0.64 to 0.99 s; `exact` needs 512 samples and 4.5 to 9.5 s for 36.3, 33.4 and 36.2 dB. Its 32-sample noise is 1.4 to 6.1 times lower in linear luminance than `nrc-permuto`'s, so it clears the bar at 16, 4 and 20 samples: 40.4 images per second, 13.7 times stock Blender. The bar counts are seed-0 counts, as for the other rows; RECIPE.md section 5 has the other seeds.
 
 ## Reproduce
 
@@ -73,7 +78,7 @@ export CUBINS=$W/nrc_cubins ENGINE=$W/engine/libcycles_nrc.so BAKES=$W/bakes
 CUDA_VISIBLE_DEVICES=0 scripts/run.sh nrc bench out/nrc_1
 ```
 
-For `nrc-hq`, run the same commands with `BAKES=$W/bakes_hq`. For `nrc-permuto`, add `BAKES=$W/bakes_permuto NRC_CONFIG=nrc/configs/run_infer.json`.
+For `nrc-hq`, run the same commands with `BAKES=$W/bakes_hq`. For `nrc-permuto`, add `BAKES=$W/bakes_permuto NRC_CONFIG=nrc/configs/run_infer.json`. For `nrc-scatter`, build `SCATTER=1 scripts/build_cubins.sh $W/tree/intern/cycles $W/scatter_cubins` and add `CUBINS=$W/scatter_cubins BAKES=$W/bakes_scatter NRC_CONFIG=nrc/configs/run_infer.json`.
 
 The `exact` configuration, the image gate, the exactness check and the Slurm job are in [RECIPE.md](RECIPE.md), sections 3 and 6.
 

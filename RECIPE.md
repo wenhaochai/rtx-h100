@@ -1,7 +1,8 @@
-# Recipe: 48,641 samples/min on one H100
+# Recipe: 55,148 samples/min on one H100
 
-On one H100, Blender 5.3.0 Cycles renders the Open Data benchmark at 48,641 samples per minute, 6.9 times stock.
+On one H100, Blender 5.3.0 Cycles renders the Open Data benchmark at 55,148 samples per minute, 7.8 times stock.
 Exact per-scene kernel specialization gives the first 2.0 times. A per-scene baked neural radiance cache that ends every path at its first hit gives most of the rest.
+The first release, `nrc`, scored 48,641 with a cache that answers the light arriving along one sampled bounce direction. `nrc-scatter` asks the cache for the light the first hit scatters toward the camera, with caches trained on targets that average eight samples at the hit, and passes the image gate on all three scenes (section 5).
 The `nrc` configuration passes the image gate at seed 0, the only seed its monster and junkshop cubins can render; the same cache on an earlier build misses the luminance limit on monster at seed 2.
 Wide BVHs, kernel concurrency and online cache training gave nothing.
 
@@ -36,13 +37,15 @@ The gate changed several times on the last day. From late morning until 19:00 ET
 Run the commands from the repository root. `$W` is one work directory; every later step and `slurm/repro.sbatch` expect this layout in it. The pinned source is Blender tag v5.3.0, commit `02f0899d78e374b63e7181d9061e1f7ab03419cc`.
 
 ```bash
-scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/ bakes_hq/ bakes_permuto/
+scripts/fetch.sh $W                           # blender/ blender-5.3.0-linux-x64/ bench/ bakes/ bakes_hq/ bakes_permuto/ bakes_scatter/
 scripts/build_host.sh $W/blender $W/host      # Blender + patches/host.diff -> host/install
 scripts/build_engine.sh $W/engine             # tiny-cuda-nn + nrc/ -> engine/libcycles_nrc.so
 
 scripts/kernel_tree.sh $W/blender $W/tree_nrc        # intern/cycles + patches/kernel/01..10
 scripts/build_cubins.sh $W/tree_nrc/intern/cycles $W/nrc_cubins
 (cd $W/nrc_cubins && sha256sum -c "$OLDPWD/configs/nrc_cubins.sha256")       # OK three times
+SCATTER=1 scripts/build_cubins.sh $W/tree_nrc/intern/cycles $W/scatter_cubins    # nrc-scatter, section 5
+(cd $W/scatter_cubins && sha256sum -c "$OLDPWD/configs/scatter_cubins.sha256")   # OK three times
 
 scripts/kernel_tree.sh $W/blender $W/tree_exact 03   # intern/cycles + patches/kernel/01..03
 FLAGS=exact_nvcc_flags.txt scripts/build_cubins.sh $W/tree_exact/intern/cycles $W/exact_cubins
@@ -76,7 +79,8 @@ One kernel patch per milestone. `scripts/kernel_tree.sh <checkout> <out> NN` sto
 | 07-merge5 | approxH | 22,760 | +3.2% | FLIP | Sobol table cap 1024 on monster; per-scene scrambling and light threshold; 16x states |
 | 08-merge7 | approxI | 22,960 | +0.9% | FLIP | indirect-only SSS walk roulette on monster; Sobol cap 256, light threshold 0.35 and 24x states on classroom; lower scrambling distance on junkshop and classroom |
 | 09-mergeN | approxN | 27,041 | +17.8% | 42.9 / 39.7 / 42.5 dB | compile-time KernelData +2.1%; flat leaf triangles +1.2%; shadow child order; per-material shading programs +4.3%; BVH2 SAH tuning; a per-cell mean radiance cache that ends paths +7.0% |
-| 10-final | **approxFinal = `nrc`** | **48,641** | +79.9% | 33.1 / 23.8 / 32.3 dB | the baked neural cache on rule c0 replaces the per-cell cache; emitter bake +5.7%; monster SSS local-intersection fix |
+| 10-final | **approxFinal = `nrc`** | 48,641 | +79.9% | 33.1 / 23.8 / 32.3 dB | the baked neural cache on rule c0 replaces the per-cell cache; emitter bake +5.7%; monster SSS local-intersection fix |
+| 10-final | **`nrc-scatter`** | **55,148** | +13.4% | 41.0 / 37.0 / 46.0 dB | the scattered cache query (`-DNRC2_FLAGS_C=1`), caches trained on averaged targets (section 5); no new render patch |
 
 Notes on the table:
 
@@ -210,13 +214,73 @@ The reason is variance, not bias. Over 8 seeds at 32 spp, with the gate's displa
 
 Under rule c0 the first hit's emission and light sampling are computed exactly, and the cache adds the rest through one sampled bounce direction: it answers the radiance arriving along that direction, weighted by the BSDF sample. Rendered with a zero cache, which keeps only the exact part, the variance of the linear luminance over the same 8 seeds is 12% of `nrc-permuto`'s on junkshop, 37% on monster and 67% on classroom. On junkshop almost all of the noise comes through the cache's term. A blurrier cache makes that term quieter, as `nrc` shows, at the price of the largest bias. Two changes to the cache did not lower junkshop's variance: a position lattice 16 times coarser (finest resolution 128 instead of 2,048: 0.0115 against 0.0116, and 1.36 dB less on the gate) and caches that cannot see the normal or the albedos (0.0112 to 0.0122). At high sample counts the variance averages out and the smaller bias wins.
 
-The scattered form of the query (Müller et al. 2021) tests where that noise comes from. It asks the cache for the radiance that the first hit scatters toward the camera, a function of the hit alone, so no bounce direction is sampled; emission and light sampling at the hit stay exact. Caches of the same two encodings, trained on records from the same renders in this form, cut the linear-luminance variance at 32 spp by 4 to 6 times on junkshop, 1.9 times on monster and 1.4 times on classroom, and the zero cache then makes up 44 to 95% of what is left. The noise does come from the one sampled direction. The scattered caches are too inaccurate to use. Each training record is a one-sample estimate of the scattering integral at the hit, with a heavy tail, and the fitted caches stay 9 to 38% below the mean before calibration. They fail the gate on junkshop and carry 2.4 to 11 times the squared bias of the same encodings in the incident form. None of them gives more images per second at the bar: junkshop does not reach it by 64 samples, and monster and classroom land within the range of the published caches.
+The scattered form of the query (Müller et al. 2021) tests where that noise comes from. It asks the cache for the radiance that the first hit scatters toward the camera, a function of the hit alone, so no bounce direction is sampled; emission and light sampling at the hit stay exact. Caches of the same two encodings, trained on records from the same renders in this form, cut the linear-luminance variance at 32 spp by 4 to 6 times on junkshop, 1.9 times on monster and 1.4 times on classroom, and the zero cache then makes up 44 to 95% of what is left. The noise does come from the one sampled direction. Trained on one-sample targets, these caches are inaccurate. Each training record is a one-sample estimate of the scattering integral at the hit, with a heavy tail, and the fitted caches stay 9 to 38% below the mean before calibration. They fail the gate on junkshop, carry 2.4 to 11 times the squared bias of the same encodings in the incident form, and give no more images per second at the bar: junkshop does not reach it by 64 samples. Targets that average 8 samples at the same hit remove that bias; `nrc-scatter` below is the result.
 
 Splitting the incident query does not pay either. Each ending path samples K bounce directions instead of one and sends K queries, each weighted 1/K. The estimate stays unbiased: at 4,096 samples the mean luminance moves by at most 0.002% from K = 1. At K = 8 the cached term's 32-spp variance falls 4.2 to 5.6 times, a little less than K: a floor of 8 to 14% of it does not fall with K, which points to where the first hit lands in the pixel rather than to the bounce direction. But one cache inference already takes about a third of a sample, so each extra query costs 0.22 to 0.40 of a sample. At the bar the best split, `nrc-hq` with K = 2, totals 22.4 images per second, against 26.4 for K = 1 on the same node and 28.6 for `nrc`. Only junkshop gains: it reaches the bar at 24 samples instead of 32, 5.46 against 5.06 images per second.
 
 The public trainer reproduces the monster cache. Baked again with `bake_stream.py --enc permuto5` from the same dumps in 207 s and folded with the published scale, it scores 38.38 dB and -0.23% on the gate, against 38.30 dB and -0.12%; its outputs differ from the published cache's by 8% relative L2 on 2^20 queries, the spread between two trainings. Junkshop and classroom were not baked again.
 
 The new library runs `nrc` as before. On one node, three official measurements each, the previous library scored 49,342 and the new one 49,339 samples per minute; the gate returns the same PSNR and luminance; on 2^20 queries through the `.so`, the outputs of the three hash caches are bit-identical, and so are the outputs of the three permuto caches against the experimental engine that first ran them. The `nrc` gate images differ from the previous library's by a relative L2 of 4e-8 to 5e-6, as two renders with the same library do.
+
+### nrc-scatter: the scattered query on averaged targets
+
+`nrc-scatter` asks the cache a different question. An `nrc` path that ends at its first hit computes the hit's emission and light sampling exactly, samples one bounce direction, and adds the cache's answer for the radiance arriving along it: the incident form. In the scattered form the cache answers the radiance that the hit scatters toward the camera, a function of the hit and the view direction alone, so no bounce direction is sampled and the noise of that one sample is gone. A hit with a BSSRDF, transparent or portal closure is not cached; its path goes on and may end at a later vertex. `nrc-scatter` runs the `nrc` host with its own cubins, the `nrc` flags with `-DNRC2_FLAGS_C=1` and the seed read at run time (`SCATTER=1 scripts/build_cubins.sh`, `configs/scatter_cubins.sha256`), and hash caches on engine `infer`: `CUBINS=$W/scatter_cubins BAKES=$W/bakes_scatter NRC_CONFIG=nrc/configs/run_infer.json`. The caches are on Hugging Face, `wchai/cycles-h100-nrc-bake`, `nrc_scatter/<scene>_t24/bake_c0.nrc`; `configs/bakes_scatter.sha256` holds their hashes.
+
+Why averaging fixes the one-sample caches: an L2 fit reaches the mean of its targets only in the limit. On one-sample junkshop records Adam's fit was still unstable late in training: over the last 30% of the steps the held-out energy moved by up to 0.3, and two passes or larger batches left the calibration scale between 1.10 and 2.34. A target that averages 8 independent BSDF samples at the same hit has the same mean and an eighth of the noise variance. On such targets every cache is unbiased: held-out energy within 0.003 of the targets on junkshop and classroom, calibration scales 1.03, 1.00 and 1.00. Caches trained on fewer paths than the one-sample dumps, 3.7 against 5.3 billion on junkshop and 3.6 against 4.8 billion on classroom, are unbiased too, so the averaging removes the bias, not the larger number of paths. Monster's records are unbiased as well; its 3% calibration offset is in every monster cache, one-sample ones included.
+
+The averaging needs 8 paths that reach the same hit, which `patches/bake/scatter.diff` provides in the dump cubins only (`-DNRC_GROUP_N=8`). The samples s of a pixel with the same s / 8 form a group, tagged for training as a whole. Its 8 paths use the camera sample of the group's first sample (filter, lens and time dimensions), so they reach the same first hit; every later dimension keeps the path's own sample index, so the BSDF samples there and the paths behind them are independent. Each path stashes one record, at the first vertex where a normal path would end, with its group key in a padding word. `nrc/bake/stream/group_avg.py` sorts the records by group key and vertex and replaces each set of m <= 8 records by one record: the mean target and the features of a member drawn at random. It keeps that record with probability m / 8, so every path keeps the weight 1/8 in expectation. The averaged targets carry the energy of the raw ones to within 0.3%. On monster 20% of the raw records are singletons, from groups whose first hit is not cacheable, so their 8 paths end at different vertices.
+
+| | |
+|---|---|
+| query | scattered, at the first cacheable vertex: direction toward the previous vertex, weighted by the throughput before the bounce |
+| model | as `nrc-hq`: t24 hash grid, 64 wide, 5 hidden layers, ReLU; an NRCINF1 file for engine `infer` (`bake_stream.py --nrcinf`) |
+| data | `nrc/bake/dump_scatter.sh`: 19, 30 and 57 renders at 2,048, 1,024 and 1,024 spp; 8.1, 12.2 and 12.1 billion paths averaged into 1.0, 1.5 and 1.5 billion records, 45, 67 and 65 GB |
+| optimizer | as `nrc-hq`; 1, 4 and 4 passes over the records (`--epochs`) |
+| training time | 51, 273 and 275 s on one H100; each dump render takes 45 to 95 s with its averaging |
+| calibration | c0 scales 1.03, 1.00 and 1.00, folded into the output layer; `calibrate.sh` with the dump cubins as `BAKE_CUBINS` |
+| cost | 0.90 GB per scene |
+
+Results on one H100 SXM:
+
+| | monster | junkshop | classroom | total |
+|---|---|---|---|---|
+| samples per minute, `nrc-scatter` | 23,367 | 15,375 | 16,406 | 55,148 |
+| samples per minute, `nrc` | 20,275 | 13,319 | 15,047 | 48,641 |
+| gate PSNR, `nrc-scatter` | 41.03 dB | 37.02 dB | 46.01 dB | |
+| gate luminance, `nrc-scatter` | -0.10% | +0.16% | -0.10% | |
+| gate PSNR, `nrc-permuto` | 38.30 dB | 34.24 dB | 38.09 dB | |
+| 1,024 samples, `nrc-scatter` | 39.2 dB | 35.7 dB | 42.0 dB | |
+| 1,024 samples, `nrc-permuto` | 37.0 dB | 32.6 dB | 37.1 dB | |
+| images per second at the 32-spp bar, `nrc-scatter` | 14.9, 16 spp | 16.7, 4 spp | 8.91, 20 spp | 40.4 |
+| images per second at the 32-spp bar, `nrc` | 13.5, 20 spp | 7.52, 20 spp | 7.58, 24 spp | 28.6 |
+| seeds 0-7 that clear the bar, `nrc-scatter` at the same counts | 7 of 8 | 7 of 8 | 2 of 8 | |
+| seeds 0-7 that clear the bar, 4 samples more | 8 of 8 | 7 of 8 | 8 of 8 | |
+
+Samples per minute are medians of six official measurements on one 8-GPU node (`slurm/repro.sbatch <repo> $W nrc-scatter`), 13.4% above `nrc` and 12.6% above `nrc-hq`, which were measured on other nodes. An ending path no longer samples a bounce direction at its last hit; which part of the gain that explains was not isolated. The other rows are seed-0 renders, three per point, with the median render time. `nrc-scatter` passes the gate on all three scenes, 2.7 to 7.9 dB above `nrc-permuto`, and has the highest PSNR of the four caches at every sample count from 16 to 1,024. At the bar it gives 13.7 times stock Blender in images per second, against 9.7 for `nrc`. The fastest of the three renders gives 15.5, 19.2 and 9.07 images per second.
+
+The bar counts are seed-0 counts, as for every configuration in this repository; the `nrc` monster and junkshop cubins cannot render another seed. The `nrc-scatter` cubins read the seed, so the table also shows how many of seeds 0 to 7 clear the bar at the same count and at 4 samples more. Seed 0 is a lucky draw on classroom: at 20 samples 2 of 8 seeds clear the bar, at 24 samples all 8. On junkshop seed 3 misses it at 4 and at 8 samples, with 14.7 and 17.2 dB against 18.84.
+
+The noise falls because the bounce sample is gone, and the bias falls because the caches are now accurate. Over 8 seeds at 32 spp, with the gate's display mapping, as in the `nrc-permuto` table above; the last column is the variance of the linear luminance:
+
+| scene | configuration | PSNR per image | bias² | variance | linear-luminance variance |
+|---|---|---|---|---|---|
+| junkshop | `nrc-hq` | 19.45 dB | 0.0021 | 0.0093 | 6.9e-4 |
+| junkshop | `nrc-permuto` | 18.37 dB | 0.0029 | 0.0116 | 7.8e-4 |
+| junkshop | `nrc-scatter` | 23.34 dB | 0.00073 | 0.0039 | 1.3e-4 |
+| monster | `nrc-hq` | 25.80 dB | 0.00052 | 0.0021 | 6.9e-4 |
+| monster | `nrc-permuto` | 25.79 dB | 0.00043 | 0.0022 | 7.2e-4 |
+| monster | `nrc-scatter` | 27.63 dB | 0.00015 | 0.0016 | 3.8e-4 |
+| classroom | `nrc-hq` | 25.33 dB | 0.00038 | 0.0025 | 3.5e-3 |
+| classroom | `nrc-permuto` | 25.40 dB | 0.00026 | 0.0026 | 3.6e-3 |
+| classroom | `nrc-scatter` | 25.98 dB | 0.00014 | 0.0024 | 2.6e-3 |
+
+Against `nrc-permuto` the squared bias falls 4.0, 2.8 and 1.8 times and the linear-luminance variance 6.1, 1.9 and 1.4 times. The variance that remains is mostly the path before the cache: rendered with a zero cache in the scattered form, which keeps only the exact part, the variance is 57, 84 and 93% of `nrc-scatter`'s. That is why classroom gains least.
+
+The mean luminance of single low-sample images is off by more than the gate's 0.5%: at the bar counts by +8.8%, -16.0% and +8.6% at seed 0. This is not the cache. Every `nrc` configuration renders with the scrambling distance of `configs/scene_settings.py` (0.04, 0.025 and 0.035), with which all pixels draw nearly the same sample offsets, so the whole frame shifts together. Exact renders with only that setting changed show shifts of the same sign at 30 of 33 sample counts from 4 to 32, and of similar size; plain exact stays within 0.13%. Over 8 seeds at 32 spp the mean shift of `nrc-scatter` is +0.4%, -1.7% and +0.0%, within 1.6 standard errors of zero, and its spread, 2.5 to 4.2%, is close to that of the incident caches and of exact with that setting. The same setting lowers per-pixel noise: at 32 spp exact with it gets 24.57, 19.12 and 24.12 dB against the bar's 24.25, 18.84 and 23.84, so about 0.3 dB of every cache's gain at the bar comes from it.
+
+A permutohedral lattice cache in the same form, trained on the same averaged targets, was measured too and is not published: gate 40.19, 36.63 and 46.14 dB, 38.5, 35.4 and 42.0 dB at 1,024 samples, and at the bar 13.3, 18.0 and 8.77 images per second at the same counts, 40.1 in total, against 41.4 for the hash cache on the same nodes. The hash cache gives slightly more images per second and a higher gate PSNR on monster and junkshop, so it is the one published.
+
+The public scripts reproduce the monster cache. Trained again by `bake_stream.py --files 's*.rec' --nrcinf` from the same averaged dumps in 57 s and calibrated by `calibrate.sh` (scale 1.031, published 1.031), it scores 40.88 dB and -0.10% on the gate, against 41.03 dB and -0.10%. One monster render through `dump_scatter.sh`, with the dump cubins built from this repository, gives the experiment's raw record count (426,752,469), luminance sum and set sizes exactly; the averaged record count differs by 0.0004%, from the random keep. Junkshop and classroom were not baked again.
 
 ## 6. Reproduce
 
@@ -229,7 +293,7 @@ scripts/make_reference.sh $W/blender-5.3.0-linux-x64 ref 0    # reference + bar,
 python3 scripts/gate.py ref out/nrc
 ```
 
-For `nrc-hq`, set `BAKES=$W/bakes_hq`. For `nrc-permuto`, set `BAKES=$W/bakes_permuto NRC_CONFIG=nrc/configs/run_infer.json`; from this repository it scores 46,384.6 (19,087.0, 13,318.4 and 13,979.2) and returns the gate of section 5 exactly.
+For `nrc-hq`, set `BAKES=$W/bakes_hq`. For `nrc-permuto`, set `BAKES=$W/bakes_permuto NRC_CONFIG=nrc/configs/run_infer.json`; from this repository it scores 46,384.6 (19,087.0, 13,318.4 and 13,979.2) and returns the gate of section 5 exactly. For `nrc-scatter`, set `CUBINS=$W/scatter_cubins BAKES=$W/bakes_scatter NRC_CONFIG=nrc/configs/run_infer.json`; from a fresh clone, with its cubins rebuilt byte-identical, it scores 55,147.6 (23,367.2, 15,374.9 and 16,405.5) and returns the gate of section 5 exactly.
 
 The `exact` configuration needs no engine, bake or reference. Its check is the image difference against the official binary, measured against the seed-to-seed noise floor:
 
@@ -243,7 +307,7 @@ BLENDER=$STOCK CUDA_VISIBLE_DEVICES=0 SEED=1 scripts/run.sh stock check out/stoc
 python3 scripts/identity.py out/stock0 out/stock1 out/exact     # project: ratios 1.4e-3 to 2.8e-3
 ```
 
-On Slurm, `sbatch slurm/repro.sbatch <repo> $W [nrc|nrc-permuto|exact]` runs six measurements and the check images of one configuration on one 8-GPU node and writes them to `$W/runs/<job id>`.
+On Slurm, `sbatch slurm/repro.sbatch <repo> $W [nrc|nrc-permuto|nrc-scatter|exact]` runs six measurements and the check images of one configuration on one 8-GPU node and writes them to `$W/runs/<job id>`.
 
 Reproduction from this repository, with the host, the cubins and the engine built by the scripts above and the public bakes:
 
@@ -253,8 +317,9 @@ Reproduction from this repository, with the host, the cubins and the engine buil
 | nrc, this repository | 20,296.7 | 13,323.4 | 15,100.9 | 48,721.0 |
 | exact, project run | 6,706 | 4,050 | 3,356 | 14,106 |
 | exact, this repository | 6,711.2 | 4,049.0 | 3,355.6 | 14,115.8 |
+| nrc-scatter, this repository | 23,367.2 | 15,374.9 | 16,405.5 | 55,147.6 |
 
-Each row is the median of six official measurements on one 8-GPU H100 node; the differences are +0.16% and +0.07%, inside the node spread of about 0.3%. For nrc, the gate returns the same PSNR and luminance as section 2 on all three scenes; it used the project's reference images, since `make_reference.sh` has not been run. For exact, the image differs from the official binary's by 1.4e-3, 2.5e-3 and 2.8e-3 of the seed-to-seed noise floor, the project's values. The nine cubins, nrc, exact and bake, rebuild byte-identical. Those two runs used the scripts before the configuration names `nrc` and `exact` and the single work-directory layout; the renamed scripts were checked by a dry run of the environment they set, not on a GPU.
+Each row is the median of six official measurements on one 8-GPU H100 node; the differences are +0.16% and +0.07%, inside the node spread of about 0.3%. For nrc, the gate returns the same PSNR and luminance as section 2 on all three scenes; it used the project's reference images, since `make_reference.sh` has not been run. For exact, the image differs from the official binary's by 1.4e-3, 2.5e-3 and 2.8e-3 of the seed-to-seed noise floor, the project's values. The nine cubins, nrc, exact and bake, rebuild byte-identical. Those two runs used the scripts before the configuration names `nrc` and `exact` and the single work-directory layout; the renamed scripts were checked by a dry run of the environment they set, not on a GPU. The `nrc-scatter` row ran `slurm/repro.sbatch` from a fresh clone, with the engine, the cubins and the caches built and fetched by the scripts above and the host of the `nrc` row; its screening measurements in the project were 23,313, 15,369 and 16,292.
 
 ### Samples per minute and image quality
 
@@ -302,13 +367,13 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 | Russian roulette exponent 2 | fails the image rule on monster and classroom | |
 | Sobol cap tuned on seed pair 0/1 | +1.5%, fails 8 of 9 other seed pairs | the FLIP drop at seeds 0/1 was chance |
 | per-cell mean cache ending at the first vertex on monster | +28% on monster, luminance -2.5% | |
-| scattered-form cache query, one-sample training targets | 32-spp variance 1.4-6x lower, but the caches fail the gate on junkshop and give no more images per second at the bar | each target is a one-sample estimate of the scattering integral; the fit stays 9-38% low (section 5) |
+| scattered-form cache query, one-sample training targets | 32-spp variance 1.4-6x lower, but the caches fail the gate on junkshop and give no more images per second at the bar | each target is a one-sample estimate of the scattering integral; the fit stays 9-38% low (section 5); fixed by averaged targets (section 5) |
 | K bounce samples and K cache queries per ending path | unbiased, cached-term variance at 32 spp 1.7-5.6x lower at K = 2-8, but at best 22.4 images per second at the bar against 28.6 for `nrc` | each extra query costs 0.22-0.40 of a sample; one inference is already about a third of a sample (section 5) |
 | tuning results from an H200 | did not transfer | same die, but 3.35 TB/s HBM on H100 against 4.8 TB/s makes spills cost more |
 
 ## 8. Limits
 
-- Seeds: at seeds 2, 4 and 6 the baked cache on approxH gives monster luminance -0.65%, +0.38% and +0.24%, so it fails at seed 2. The `nrc` monster and junkshop cubins fold the seed to 0, so `nrc` was checked at seed 0 only.
+- Seeds: at seeds 2, 4 and 6 the baked cache on approxH gives monster luminance -0.65%, +0.38% and +0.24%, so it fails at seed 2. The `nrc` monster and junkshop cubins fold the seed to 0, so `nrc` was checked at seed 0 only. The `nrc-scatter` cubins read the seed: at its seed-0 bar counts 7, 7 and 2 of seeds 0-7 clear the 32-spp bar on monster, junkshop and classroom (section 5).
 - Sobol caps: the `nrc` cubins keep the Sobol table caps of approxH and approxI, 1024 on monster and 256 on classroom. Their FLIP benefit at seeds 0 and 1 was chance; `nrc` was not measured without them.
 - The gate: the final number depends on the 32-spp gate. Under the FLIP rule used until the last evening, the best official scores were about 23,000; approxN and the fast cache rules were judged only under the later rules.
 - No ablation of `nrc`: which earlier steps still matter under rule c0 is not measured. Under c0 the deep-bounce gains of roulette, SSS walk and bounce limits should largely vanish.

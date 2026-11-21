@@ -12,7 +12,7 @@
 #   monster    seeds 61-79,  2048 spp, train fraction 0.2: 1.01e9 records, 45 GB
 #   junkshop   seeds 61-90,  1024 spp, train fraction 0.2: 1.53e9 records, 67 GB
 #   classroom  seeds 61-117, 1024 spp, train fraction 0.1: 1.49e9 records, 65 GB
-# A raw dump takes 9 to 19 GB; one render and its averaging take 55 to 95 s on an H100. A seed whose .rec exists is
+# A raw dump takes 9 to 19 GB; one render and its averaging take 45 to 95 s on an H100. A seed whose .rec exists is
 # skipped. Then bake (4 passes on junkshop and classroom, 1 on monster) and calibrate:
 #   python3 nrc/bake/stream/bake_stream.py --dump <out> --files 's*.rec' --epochs 4 --nrcinf --out <bake dir>/bake.nrc
 #   nrc/bake/calibrate.sh <scene> <bake dir>      (BAKE_CUBINS as here: zero cache and cache in the scattered form)
