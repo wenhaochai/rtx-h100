@@ -9,6 +9,7 @@
 #   check: a fixed-seed image per scene: nrc 4096 spp for scripts/gate.py; exact and stock 32 spp for
 #          scripts/identity.py. SEED (default 0) sets the seed, CHECK_SPP the sample count. Writes <out>/<scene>_s<spp>.exr
 #          and <scene>_s<spp>.log, whose "Rendered N samples in T seconds" line is the render time without scene load.
+#          MOVE="tx,ty,tz,rx,ry,rz" moves the camera first (scripts/move_camera.py).
 #   BENCH_LOG=<file> keeps the full Blender log of a bench run.
 #   RTX PRO 6000: CONFIGS=configs/pro6000 (CUDA route) or configs/pro6000-optix with PTX=<build_ptx.sh dir> (OptiX
 #   route); NRC_CONFIG=nrc/configs/run_mma_pro6000.json; BENCH_DEVICE=OPTIX with stock for stock OptiX.
@@ -80,7 +81,7 @@ else
   for s in "${SCENES[@]}"; do
     blend=$(find "$BENCH/scenes" -path "*/$s/main.blend" | head -1)
     env $(senv "$s" | tr ',' ' ') "$BLENDER/blender" -b --factory-startup -noaudio --debug-cycles "$blend" ${PRE_PY:+--python-expr "$PRE_PY"} \
-      --python "$HERE/scripts/render_check.py" -- "$OUT/${s}_s$SPP.exr" "$SPP" "${SEED:-0}" > "$OUT/${s}_s$SPP.log" 2>&1 || true
+      --python "$HERE/scripts/move_camera.py" --python "$HERE/scripts/render_check.py" -- "$OUT/${s}_s$SPP.exr" "$SPP" "${SEED:-0}" > "$OUT/${s}_s$SPP.log" 2>&1 || true
     grep -E "render_check|scene_settings|Error|error" "$OUT/${s}_s$SPP.log" | tail -4 || true
     [ -s "$OUT/${s}_s$SPP.exr" ] || { echo "no image for $s; log: $OUT/${s}_s$SPP.log"; tail -20 "$OUT/${s}_s$SPP.log"; exit 1; }
   done
