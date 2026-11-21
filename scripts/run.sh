@@ -15,7 +15,8 @@
 #   BLENDER  install dir of build_host.sh (nrc, exact) or the official binary's dir (stock)
 #   CUBINS   dir with <scene>.cubin from build_cubins.sh, built for the same configuration (nrc, exact)
 #   ENGINE   libcycles_nrc.so (build_engine.sh)     BAKES   dir with <scene>/bake_c0.nrc (fetch.sh)     (nrc only)
-#   NRC_CONFIG  engine config (default nrc/configs/run_wgmma.json); nrc-permuto: nrc/configs/run_infer.json, BAKES=$W/bakes_permuto
+#   NRC_CONFIG  engine config (default nrc/configs/run_wgmma.json); nrc-permuto: nrc/configs/run_infer.json, BAKES=$W/bakes_permuto;
+#               nrc-scatter: nrc/configs/run_infer.json, BAKES=$W/bakes_scatter, CUBINS=$W/scatter_cubins (SCATTER=1 build_cubins.sh)
 set -euo pipefail
 CFG=${1:?nrc|exact|stock}; MODE=${2:?bench|check}; OUT=${3:?out dir}; shift 3
 SCENES=("$@"); [ ${#SCENES[@]} = 0 ] && SCENES=(monster junkshop classroom)
