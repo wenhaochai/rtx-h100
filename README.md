@@ -12,7 +12,7 @@ Exact per-scene kernel specialization gives the first 2.0 times. A per-scene bak
 
 ## News
 
-- **2026-11-21** RTX PRO 6000 support: the `exact` and `nrc` configurations ported to the RTX PRO 6000 Blackwell (sm_120) and tuned there, plus an OptiX route on its RT cores. `nrc` at 78,297 samples per minute with OptiX and 74,847 with CUDA; `exact` at 19,942 with CUDA, 25,864 with OptiX. [#7](https://github.com/wenhaochai/rtx-h100/pull/7)
+- **2026-11-21** RTX PRO 6000 support: the `exact` and `nrc` configurations ported to the RTX PRO 6000 Blackwell (sm_120) and tuned there, plus an OptiX route on its RT cores. `nrc` at 78,297 samples per minute with OptiX and 74,847 with CUDA; `exact` at 19,942 with CUDA, 25,864 with OptiX; `nrc` gives 39.9 images per second at the 32-spp bar with OptiX, 6.1 times stock OptiX on the same card. [#7](https://github.com/wenhaochai/rtx-h100/pull/7)
 - **2026-11-21** `nrc-scatter`: the cache answers the light the first hit scatters toward the camera and learns it from targets that average eight samples at that hit. 55,148 samples per minute, up from 48,641; 40.4 images per second at the 32-spp bar, up from 28.6. [#5](https://github.com/wenhaochai/rtx-h100/pull/5)
 - **2026-11-21** Negative result: sampling K bounces and querying the cache K times per ending path cuts the cache's noise but costs more than it saves at the bar. [#4](https://github.com/wenhaochai/rtx-h100/pull/4)
 - **2026-11-20** Negative result: the scattered query trained on one-sample targets shows where the low-sample noise comes from, but its caches are biased. [#3](https://github.com/wenhaochai/rtx-h100/pull/3)
@@ -85,7 +85,18 @@ The same recipe on one NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120, 188
 | `nrc`, CUDA | 33,890 | 19,571 | 21,385 | 74,847 | approximate, passes the image gate |
 | **`nrc`, OptiX** | **35,634** | **22,040** | **20,623** | **78,297** | approximate, passes the image gate |
 
-The largest change from the H100 configuration is the shade kernels' register budget: the H100's 64 registers are the worst point measured on sm_120, and 384 threads at 168 registers give +40%. The rest comes from gathering the hash grid inside the fused MLP kernel, fp16 accumulation in its `mma.sync` core, scrambling distance 0, per-scene build choices, and on the OptiX route an OptiX module register limit and the walk roulette of the CUDA SSS walk. Applied to an earlier OptiX tree for this card, the exact shading changes of this repository give 28,187 within the exact tier and 31,384 within the strict tier, below the seed-to-seed noise floor. [RESULTS-rtxpro6000.md](RESULTS-rtxpro6000.md) has every step, the image checks, what did not help and the reproduction; the configurations are in `configs/pro6000/` (CUDA), `configs/pro6000-optix/` and `patches/optix/` (OptiX), and `configs/pro6000-v53/` and `patches/v53/`.
+| images per second at the 32-spp bar | monster | junkshop | classroom | total | vs stock, same device |
+|---|---|---|---|---|---|
+| stock Blender 5.3.0, CUDA, 32 spp | 1.65 | 1.04 | 0.77 | 3.46 | 1.0x |
+| stock Blender 5.3.0, OptiX, 32 spp | 3.19 | 2.12 | 1.20 | 6.52 | 1.0x |
+| `exact`, CUDA, 32 spp | 3.26 | 1.82 | 1.17 | 6.25 | 1.8x |
+| `exact`, OptiX, 32 spp | 3.80 | 2.38 | 1.30 | 7.48 | 1.15x |
+| `nrc`, CUDA, 16 / 20 / 20 spp | 18.2 | 8.9 | 10.0 | 37.1 | 10.7x |
+| **`nrc`, OptiX, 16 / 20 / 20 spp** | **19.2** | **9.8** | **10.9** | **39.9** | **6.1x** |
+
+Counted as for the H100 table above: images per second that reach the PSNR of an exact 32-spp render against the 65,536-spp reference, one over the median render time of three seed-0 renders at the fewest samples that clear the bar, without scene load. `nrc` clears it at 16, 20 and 20 samples on this card, against 20, 20 and 24 on the H100, and gives 39.9 images per second against 28.6 there; its mean luminance at those counts is off by +1.8%, -1.3% and +5.0%. The CUDA and OptiX routes render the same `nrc` images. `nrc-scatter` (40.4 on the H100) is not ported yet: its inference engine, `nrc_infer.cu`, uses wgmma and builds for sm_90a only.
+
+[RESULTS-rtxpro6000.md](RESULTS-rtxpro6000.md) has every step, the image checks and the reproduction.
 
 ## Reproduce
 
