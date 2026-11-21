@@ -1,7 +1,8 @@
 """Offline bake of one scene's radiance cache from dumped training records (nrc/bake/dump.sh), each record used once.
-Writes an NRCBAKE1 file for the nrc engine; calibrate it with nrc/bake/calibrate.sh as any other bake.
+Writes an NRCBAKE1 file for the nrc engine (--enc hash) or an NRCINF1 file for engine infer (--enc permuto5);
+calibrate either with nrc/bake/calibrate.sh.
 
-  bake_stream.py --dump <dir with s61.rec .. s69.rec> --out <dir>/bake.nrc [--config nrc/configs/t24.json]
+  bake_stream.py --dump <dir with s61.rec .. s69.rec> --out <dir>/bake.nrc [--config nrc/configs/t24.json] [--enc permuto5]
 
 Model: as configs/t24.json and the engine: the t24 hash grid (16 levels x 2 features, 2^24 entries per level,
 resolution 128 to 2048) on position, one-blob (4 bins) on direction, normal and roughness, identity on the albedos,
@@ -11,6 +12,12 @@ first 10% of steps then 0.9999, and an exponential moving average of the weights
 0.9999 over 80% of the steps; the average is exported. Batches of 2^18 records, drawn without replacement from a GPU
 buffer of 2^25 records filled with whole calls of all dump files in a shuffled order. The MLP runs in bf16 autocast.
 Dump format, per engine call: [u32 n][n x 16 fp16 inputs][n x 3 fp32 targets].
+
+--enc permuto5 replaces the hash grid by a permutohedral lattice grid (permuto_triton.py) on position and outgoing
+direction, x[0:5]: 5 levels x 8 features, 2^23 entries per level, hash-grid-equivalent resolution 128 to 2048 on
+position and 4 to 64 on direction. One-blob on normal and roughness and identity on the albedos as before:
+40 + 12 + 6 = 58 features, padded with ones to 64. Same MLP and training; the table gradient is one fp32 vector atomic
+per lattice vertex.
 """
 import argparse, glob, json, math, os, queue, struct, sys, threading, time
 
@@ -19,6 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import hashgrid_triton as HT
+import permuto_triton as PT
 
 DEV = "cuda"
 REC = 16 * 2 + 3 * 4   # bytes per record
@@ -75,15 +83,20 @@ class MLP(torch.nn.Module):
         return (h @ self.layers[-1].t())[:, :3]
 
 
+# --enc permuto5: lattice on x[0:5] (position, outgoing direction); levels, features, log2 entries, resolution range
+P5 = dict(d=5, n_levels=5, n_features=8, log2_T=23, res_lo=[128.0] * 3 + [4.0] * 2, res_hi=[2048.0] * 3 + [64.0] * 2)
+
+
 class Net(torch.nn.Module):
-    def __init__(self, width, depth):
+    def __init__(self, width, depth, enc="hash"):
         super().__init__()
-        self.grid = HT.patch(HashGrid())
+        self.d = 3 if enc == "hash" else 5
+        self.grid = HT.patch(HashGrid()) if enc == "hash" else PT.PermutoGrid(**P5)
         self.mlp = MLP(64, width, depth)
 
-    def forward(self, x):  # x: B x 14 (position 3, one-blob 5, identity 6)
+    def forward(self, x):  # x: B x 14 (grid on x[0:d], one-blob on x[d:8], identity on x[8:14])
         x = x.float()
-        e = torch.cat([self.grid(x[:, 0:3]), one_blob(x[:, 3:8]), x[:, 8:14]], 1)
+        e = torch.cat([self.grid(x[:, :self.d]), one_blob(x[:, self.d:8]), x[:, 8:14]], 1)
         e = torch.cat([e, torch.ones(e.shape[0], 64 - e.shape[1], device=e.device)], 1)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.training):
             return self.mlp(e).float()
@@ -146,6 +159,45 @@ def write_bake(path, net, config, steps, meta):
     os.replace(path + ".tmp", path)
 
 
+def write_nrcinf(path, hdr, sections):
+    """NRCINF1 (nrc/src/nrc_infer.cu load_nrcinf): b"NRCINF1\\0" | uint64 header bytes | header JSON, padded with spaces
+    to a 256-byte boundary | blob. The header's "sections" maps each name to [offset in blob, bytes]; every section
+    starts on a 256-byte boundary. Sections (little endian, matrices row-major out x in): grid (table entries x
+    features fp16), w0 (width x 64 fp16), hidden ((depth - 1) x width x width fp16), out (16 x width fp16, rows 3..15
+    zero)."""
+    blob, table = bytearray(), {}
+    for k, arr in sections:
+        b = np.ascontiguousarray(arr).tobytes()
+        while len(blob) % 256: blob.append(0)
+        table[k] = [len(blob), len(b)]
+        blob += b
+    hs = json.dumps(dict(hdr, sections=table)).encode()
+    pad = (-(16 + len(hs))) % 256
+    with open(path + ".tmp", "wb") as f:
+        f.write(b"NRCINF1\0"); f.write(struct.pack("<Q", len(hs) + pad)); f.write(hs); f.write(b" " * pad); f.write(blob)
+    os.replace(path + ".tmp", path)
+
+
+def export_permuto(path, net, width, depth, meta):
+    """NRCINF1 fp16 file of a --enc permuto5 model for engine infer. Per level l and dim j the lattice coordinate is
+    (x_j + shift[l][j]) * scale[l][j] (fp32, the grid's buffers); the d+1 vertex keys are hashed as h = (h + key_j) *
+    2531011 (uint32, h = 0 first); table row = l * 2^log2_hashmap + (h & (2^log2_hashmap - 1))."""
+    g = net.grid
+    f32 = lambda t: [[float(v) for v in r] for r in t.detach().float().cpu().tolist()]
+    w = g.width + 4 * (8 - g.d) + 6
+    hdr = {"format": 1, "width": width, "depth": depth, "act": "relu", "out_act": "linear", "precision": "fp16",
+           "encoding": "permuto", "mlp_in": 64,
+           "permuto": {"d": g.d, "n_levels": g.L, "n_features": g.F, "log2_hashmap": g.log2_T, "n_entries": g.n_entries,
+                       "scale": f32(g.sc), "shift": f32(g.sh), "res_lo": P5["res_lo"], "res_hi": P5["res_hi"],
+                       "hash": {"kind": "tcnn_base_convert", "multiplier": PT.HASH_P, "init": 0}},
+           "inputs": {"lattice": [0, g.d], "one_blob": [g.d, 8], "one_blob_bins": 4, "identity": [8, 14],
+                      "ones": [w, 64], "encoding_width": w},
+           "meta": meta}
+    lay = [p.detach().half().cpu().numpy() for p in net.mlp.layers]
+    write_nrcinf(path, hdr, [("grid", g.table.detach().half().cpu().numpy()), ("w0", lay[0]),
+                             ("hidden", np.stack(lay[1:depth])), ("out", lay[depth])])
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
@@ -157,6 +209,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--lr_end", type=float, default=1e-4)
     ap.add_argument("--max_records", type=float, default=0, help="stop after this many records (0 = all; smoke tests)")
+    ap.add_argument("--enc", default="hash", choices=["hash", "permuto5"], help="hash: NRCBAKE1 for the nrc engine; "
+                    "permuto5: NRCINF1 for engine infer")
     a = ap.parse_args()
     model = json.load(open(a.config))
     net_cfg = model["network"]
@@ -172,8 +226,8 @@ def main():
 
     torch.manual_seed(0)
     W, D = net_cfg["n_neurons"], net_cfg["n_hidden_layers"]
-    net = Net(W, D)
-    ema = Net(W, D); ema.load_state_dict(net.state_dict()); ema.requires_grad_(False)
+    net = Net(W, D, a.enc)
+    ema = Net(W, D, a.enc); ema.load_state_dict(net.state_dict()); ema.requires_grad_(False)
     params = list(net.parameters())
     opt = torch.optim.Adam(params, lr=a.lr, betas=(0.9, 0.999), eps=1e-15, fused=True)
     warm = max(1, steps // 50)
@@ -204,8 +258,11 @@ def main():
                 if not math.isfinite(float(loss)): raise RuntimeError("diverged")
                 print(f"step {s}/{steps} loss {float(loss):.4g} lr {opt.param_groups[0]['lr']:.3g} {time.time() - t0:.0f} s", flush=True)
         del X, Y, perm
-    write_bake(a.out, ema, config, s, {"trainer": "nrc/bake/stream/bake_stream.py", "records": s * a.batch,
-                                       "dump": os.path.basename(os.path.normpath(a.dump))})
+    meta = {"trainer": "nrc/bake/stream/bake_stream.py", "records": s * a.batch, "dump": os.path.basename(os.path.normpath(a.dump))}
+    if a.enc == "hash":
+        write_bake(a.out, ema, config, s, meta)
+    else:
+        export_permuto(a.out, ema, W, D, dict(meta, enc=a.enc, steps=s, batch=a.batch, lr=a.lr, lr_end=a.lr_end))
     print(f"wrote {a.out}: {s} steps, {time.time() - t0:.0f} s", flush=True)
 
 
