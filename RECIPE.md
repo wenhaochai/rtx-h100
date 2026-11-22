@@ -321,6 +321,23 @@ The public scripts reproduce the monster cache. Trained again by `bake_stream.py
 
 The public scripts reproduce the junkshop and classroom caches too. From a fresh clone, with the bake host built by `scripts/build_host.sh`, `dump_scatter.sh` renders 30 and 57 dumps whose averaging keeps 1.527 and 1.486 billion records, the experiment's counts to four digits; `bake_stream.py --files 's*.rec' --epochs 4 --nrcinf` trains on them in 268 and 271 s, and `calibrate.sh` fits scales of 1.0001 and 1.0004. The retrained caches score 36.97 dB and +0.15%, and 45.81 dB and -0.10%, on the gate, against 37.02 dB and +0.16%, and 46.01 dB and -0.10%, for the published caches; the retrained monster cache was 0.15 dB under as well.
 
+### After a denoiser
+
+A second protocol counts images per second after a denoiser. Every image is denoised before it is checked, by Intel Open Image Denoise 2.5.1: CPU device, filter `RT` on the color alone (no albedo or normal), `hdr` on, quality high. The reference is the mean of four exact 16,384-spp renders, not denoised, display-mapped as in section 2. The bar is the mean PSNR of eight exact 32-spp renders, each denoised: 39.53, 34.93 and 36.09 dB. A session is one Blender process per scene. It loads the scene, renders a warm-up image, then renders 16 images at 16 new seeds, and its time per image is the wall time of the 16 divided by 16; the denoiser is not timed. A session passes when its mean PSNR is at least the bar less 0.05 dB, every image is at least the bar less 0.2 dB, and no two images are equal. The 4,096-spp image at seed 0 must also clear the bar after the denoiser, with the 0.5% luminance limit. A configuration's sample count per scene is the fewest at which three of three sessions pass, and its value is one over the median time per image of the three. The values of the three scenes are summed.
+
+| configuration | monster | junkshop | classroom | images per second | vs `exact` |
+|---|---|---|---|---|---|
+| `exact`, 32 spp | 0.377 s | 0.629 s | 0.865 s | 5.40 | 1.0x |
+| `exact` at the cache configurations' scrambling distances, 32 spp | fails | fails | fails | 0 | |
+| `nrc-scatter`, published distances | fails up to 1,024 spp | 888 spp, 3.28 s | 192 spp, 0.744 s | 1.65 | 0.31x |
+| **`nrc-scatter` at scrambling distance 1.0** | **44 spp, 0.166 s** | **36 spp, 0.214 s** | **20 spp, 0.132 s** | **18.3** | **3.4x** |
+
+Each cell is the sample count and the median time per image. `exact` gave 5.40, 5.42 and 5.45 images per second on three nodes; each other row was measured on a node next to its own `exact` row, and the table shows the first. With the published distances `nrc-scatter` passes nothing below 192 samples. Where its sessions fail with a mean PSNR above the bar, the check that fails is the per-image floor: on monster at 1,024 samples the mean is 40.95 dB, 1.4 dB over the bar, but the lowest image is 39.22 dB. On classroom 192 samples passed three of three sessions on one node and one of three on another.
+
+The cause is the scrambling distance, not the cache. With the published distances all pixels draw nearly the same sample offsets (the luminance paragraphs above), so an image's error is shared across the frame and changes with the seed, and the denoiser keeps such low-frequency error as image content. Changing only that setting moves both configurations across the bar. `exact` at 32 samples with the cache configurations' distances fails all three sessions on every scene, although it renders 13% more images per second. `nrc-scatter` at 1.0 passes at 44, 36 and 20 samples, and every image is within 0.08 dB of its session's mean, against 1.5 to 2.5 dB with the published distances. Its gate after the denoiser is 42.38, 37.51 and 46.98 dB, with luminance +0.01, +0.10 and +0.11%. At 40, 32 and 16 samples the mean misses the bar. These sessions used cubins that read the scrambling distance at run time; the `SCRAMBLING=1.0` cubins above fold it in.
+
+The bias of the cache matters less than it seemed. With the published distances, the denoised 4,096-spp gate image of `nrc-scatter` is 41.58, 37.27 and 46.47 dB, so its bias alone spends 62, 58 and 9% of the bar's squared error. At 1.0 the same caches pass at 20 to 44 samples. The permutohedral lattice cache of the paragraph above, at the published distances, needs 712 and 216 samples on junkshop and classroom and fails monster up to 1,024: 1.62 images per second, against 1.64 for the hash cache at its own counts on the same node.
+
 ## 6. Reproduce
 
 ```bash
@@ -410,6 +427,7 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 | scattered-form cache query, one-sample training targets | 32-spp variance 1.4-6x lower, but the caches fail the gate on junkshop and give no more images per second at the bar | each target is a one-sample estimate of the scattering integral; the fit stays 9-38% low (section 5); fixed by averaged targets (section 5) |
 | K bounce samples and K cache queries per ending path | unbiased, cached-term variance at 32 spp 1.7-5.6x lower at K = 2-8, but at best 22.4 images per second at the bar against 28.6 for `nrc` | each extra query costs 0.22-0.40 of a sample; one inference is already about a third of a sample (section 5) |
 | scrambling distance 0.125 to 0.5 on `nrc-scatter` | fewer samples at the eight-seed bar than the published distances, but single images 0.7 to 5.1% off in luminance there | the frame still shifts with the seed; only 1.0 stays within 0.5% (section 5) |
+| a permutohedral lattice cache in the scattered form, after a denoiser | 1.62 images per second at the published scrambling distances, against 1.64 for the hash cache; monster fails up to 1,024 spp with both | the scrambling distance, not the cache, limits both after the denoiser (section 5) |
 | tuning results from an H200 | did not transfer | same die, but 3.35 TB/s HBM on H100 against 4.8 TB/s makes spills cost more |
 
 ## 8. Limits
