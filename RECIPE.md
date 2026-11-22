@@ -338,6 +338,23 @@ The cause is the scrambling distance, not the cache. With the published distance
 
 The bias of the cache matters less than it seemed. With the published distances, the denoised 4,096-spp gate image of `nrc-scatter` is 41.58, 37.27 and 46.47 dB, so its bias alone spends 62, 58 and 9% of the bar's squared error. At 1.0 the same caches pass at 20 to 44 samples. The permutohedral lattice cache of the paragraph above, at the published distances, needs 712 and 216 samples on junkshop and classroom and fails monster up to 1,024: 1.62 images per second, against 1.64 for the hash cache at its own counts on the same node.
 
+### The cache at the second hit
+
+Ending the path one bounce later should leave less of the image to the cache. We traced one exact bounce at the first hit, with a BSDF sample and light sampling as in `exact`, ended the path at the second hit and queried a cache there, in the scattered form (the light scattered toward the first hit) and in the incident form. Both caches were trained from scratch on averaged targets dumped at the second hit by the same bake path, where the eight paths of a group share the bounce and so reach the same second hit, and calibrated there. Seed 0 for the bar and the 1,024-spp point, seeds 0 to 7 for the variance, the published scrambling distances throughout:
+
+| | scattered, second hit | incident, second hit | `nrc-scatter` |
+|---|---|---|---|
+| samples per minute | 31,123 | 29,945 | 55,148 |
+| gate PSNR | 42.07 / 40.80 / 45.22 dB | 41.92 / 39.17 / 44.75 dB | 41.03 / 37.02 / 46.01 dB |
+| bar, seed 0 | 32 / 48 / 32 spp | 32 / 64 / 32 spp | 16 / 4 / 20 spp |
+| images per second at the bar | 12.8 | 11.7 | 40.4 |
+| PSNR at 1,024 spp | 38.26 / 35.69 / 39.85 dB | 38.03 / 34.96 / 39.45 dB | 39.15 / 35.70 / 41.97 dB |
+| render time at 1,024 spp | 4.10 / 7.00 / 7.78 s | 4.21 / 7.49 / 8.21 s | 2.54 / 3.77 / 3.71 s |
+| variance at 32 spp | 0.0031 / 0.0128 / 0.0037 | 0.0035 / 0.0145 / 0.0039 | 0.0016 / 0.0039 / 0.0024 |
+| images per second after a denoiser | 0.65 | 1.00 | 1.65 |
+
+The bias falls where it was largest. The gate rises by 1.0 and 3.8 dB on monster and junkshop, and the denoised gate image is 44.3 and 43.0 dB against 41.6 and 37.3. But a sample costs 1.6 to 2.2 times as much, for the sampled bounce, the light sample and the second intersection. The sampled bounce also brings back the noise the scattered query removed: at 32 samples the variance is 1.5 to 3.7 times `nrc-scatter`'s. At 1,024 samples both are limited by noise, and the second-hit caches are no better and take 1.6 to 2.2 times as long. After a denoiser they need 256 to 860 samples, and the scattered form fails classroom up to 256. Both protocols reject it.
+
 ## 6. Reproduce
 
 ```bash
@@ -428,6 +445,7 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 | K bounce samples and K cache queries per ending path | unbiased, cached-term variance at 32 spp 1.7-5.6x lower at K = 2-8, but at best 22.4 images per second at the bar against 28.6 for `nrc` | each extra query costs 0.22-0.40 of a sample; one inference is already about a third of a sample (section 5) |
 | scrambling distance 0.125 to 0.5 on `nrc-scatter` | fewer samples at the eight-seed bar than the published distances, but single images 0.7 to 5.1% off in luminance there | the frame still shifts with the seed; only 1.0 stays within 0.5% (section 5) |
 | a permutohedral lattice cache in the scattered form, after a denoiser | 1.62 images per second at the published scrambling distances, against 1.64 for the hash cache; monster fails up to 1,024 spp with both | the scrambling distance, not the cache, limits both after the denoiser (section 5) |
+| ending the path at the second hit, with caches retrained there | gate up to 3.8 dB higher, but 12.8 images per second at the seed-0 bar against 40.4 for `nrc-scatter`, and 0.65 to 1.00 after a denoiser against 1.65 | a sample costs 1.6 to 2.2 times as much, and the sampled bounce brings back its noise (section 5) |
 | tuning results from an H200 | did not transfer | same die, but 3.35 TB/s HBM on H100 against 4.8 TB/s makes spills cost more |
 
 ## 8. Limits
