@@ -355,6 +355,23 @@ Ending the path one bounce later should leave less of the image to the cache. We
 
 The bias falls where it was largest. The gate rises by 1.0 and 3.8 dB on monster and junkshop, and the denoised gate image is 44.3 and 43.0 dB against 41.6 and 37.3. But a sample costs 1.6 to 2.2 times as much, for the sampled bounce, the light sample and the second intersection. The sampled bounce also brings back the noise the scattered query removed: at 32 samples the variance is 1.5 to 3.7 times `nrc-scatter`'s. At 1,024 samples both are limited by noise, and the second-hit caches are no better and take 1.6 to 2.2 times as long. After a denoiser they need 256 to 860 samples, and the scattered form fails classroom up to 256. Both protocols reject it.
 
+### An unbiased control variate
+
+At the vertex where `nrc-scatter` ends a path, the path can instead continue exactly with probability p. It then divides its throughput by p and adds the cache with weight -(1 - p)/p; otherwise it ends with the cache. The estimator C + [continue] (L - C)/p is unbiased for any cache C. We used the published caches and scrambling distances, with p = 1/4, 1/8 and 1/16. Luminance and variance are over seeds 0 to 7 at 1,024 samples, and the variance is given as a multiple of `exact`'s there:
+
+| | p = 1/4 | p = 1/8 | p = 1/16 | `nrc-scatter` | `exact` |
+|---|---|---|---|---|---|
+| samples per minute | 34,412 | 39,049 | 43,219 | 55,148 | 14,106 |
+| gate PSNR | 39.23 / 36.06 / 32.27 dB | 37.02 / 33.37 / 27.11 dB | 34.61 / 30.45 / 23.12 dB | 41.03 / 37.02 / 46.01 dB | |
+| luminance | -0.07 / +0.08 / -16.9% | -0.40 / +0.08 / -25.9% | -1.24 / +0.10 / -33.0% | -0.10 / +0.07 / +0.11% | -0.00 / -0.01 / -0.00% |
+| variance, times `exact`'s | 3.7 / 4.5 / 2.4 | 6.2 / 8.5 / 4.3 | 10 / 17 / 15 | 0.55 / 0.45 / 0.42 | 1 |
+| bar, seed 0 | 128 / 128 spp, classroom fails | none up to 128 spp | none up to 128 spp | 16 / 4 / 20 spp | 32 spp |
+| images per second after a denoiser | 0.60 | 0.24 | 0.23 | 1.65 | 5.40 |
+
+On junkshop, which clamps no samples, the estimator is unbiased. Its luminance is within about one standard error (0.1%) of the reference at every p, and at p = 1/4 its squared bias at 1,024 samples is a ninth of `nrc-scatter`'s. Classroom and monster clamp samples (`sample_clamp_indirect` 9 and 30 in their `kdata_const.h`, and classroom clamps direct light at 16.5). The continued path carries 1/p times the throughput, so its contributions reach the clamp, while the negative cache term is not clamped. The deficit grows with 1/p: 17, 26 and 33% on classroom, and 0.07, 0.40 and 1.2% on monster. Clamping before the 1/p weight would remove it; we did not build that.
+
+The variance is the larger problem. One path in 1/p carries all of the indirect light, and the cache predicts only its mean, so the variance is about 1/p times `exact`'s: 4.5, 8.5 and 17 times on junkshop. At 2.4 to 3.1 times `exact`'s samples per minute, the control variate is worse than `exact` at equal render time for every p, and far worse than `nrc-scatter`.
+
 ## 6. Reproduce
 
 ```bash
@@ -446,6 +463,7 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 | scrambling distance 0.125 to 0.5 on `nrc-scatter` | fewer samples at the eight-seed bar than the published distances, but single images 0.7 to 5.1% off in luminance there | the frame still shifts with the seed; only 1.0 stays within 0.5% (section 5) |
 | a permutohedral lattice cache in the scattered form, after a denoiser | 1.62 images per second at the published scrambling distances, against 1.64 for the hash cache; monster fails up to 1,024 spp with both | the scrambling distance, not the cache, limits both after the denoiser (section 5) |
 | ending the path at the second hit, with caches retrained there | gate up to 3.8 dB higher, but 12.8 images per second at the seed-0 bar against 40.4 for `nrc-scatter`, and 0.65 to 1.00 after a denoiser against 1.65 | a sample costs 1.6 to 2.2 times as much, and the sampled bounce brings back its noise (section 5) |
+| an unbiased control variate: continue past the cache with probability p and add (exact - cache)/p | unbiased on junkshop, but at p = 1/4 to 1/16 the variance is about 1/p times `exact`'s, and classroom renders 17 to 33% dark | one path in 1/p carries all the indirect light; the scenes' sample clamps cut the 1/p-weighted paths (section 5) |
 | tuning results from an H200 | did not transfer | same die, but 3.35 TB/s HBM on H100 against 4.8 TB/s makes spills cost more |
 
 ## 8. Limits
