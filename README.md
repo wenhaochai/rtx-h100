@@ -12,6 +12,7 @@ Exact per-scene kernel specialization gives the first 2.0 times. A per-scene bak
 
 ## News
 
+- **2026-11-22** Moved cameras: from a camera moved by 1 to 10% of its focus distance, `exact` keeps its gate PSNR and `nrc-hq` loses up to 4.2 dB, but `nrc-scatter` loses 3.4 and 9.4 dB at 1% on junkshop and classroom and fails the gate there from 1 to 3%. The error sits on surfaces the published camera never saw, where the scattered cache has no training data. [#14](https://github.com/wenhaochai/rtx-h100/pull/14)
 - **2026-11-22** Negative result: an unbiased control variate on `nrc-scatter`, which continues exactly past the cache with probability p = 1/4 to 1/16, has about 1/p times `exact`'s variance, and on scenes that clamp samples it has a large bias of its own. [#13](https://github.com/wenhaochai/rtx-h100/pull/13)
 - **2026-11-22** Negative result: ending the path at the second hit, with caches retrained there, lowers the cache's bias but gives 12.8 images per second at the 32-spp bar against 40.4 for `nrc-scatter`: the extra bounce costs 1.6 to 2.2 times as much per sample and brings back its noise. [#12](https://github.com/wenhaochai/rtx-h100/pull/12)
 - **2026-11-22** After a denoiser: at scrambling distance 1.0 `nrc-scatter` reaches the denoised exact 32-spp quality at 44, 36 and 20 samples, 18.3 images per second against 5.40 for `exact`; with the published distances it needs 192 samples or more, or fails, because their frame-wide error survives the denoiser. [#11](https://github.com/wenhaochai/rtx-h100/pull/11)
@@ -86,6 +87,28 @@ The benchmark counts samples, and a cached sample does far less work than an exa
 `nrc-permuto` lifts it further with the same 64-wide network. At 1,024 samples it reaches 37.0, 32.6 and 37.1 dB, 1.7, 1.5 and 2.1 dB above `nrc-hq`. At the bar it is the slowest of the three published caches: at 32 samples its noise on junkshop stays at the exact build's level, and junkshop needs 40 samples. The three scenes give 19.1 images per second. RECIPE.md section 5 has the bias and variance split.
 
 `nrc-scatter` has the highest PSNR of the four caches at every sample count. At 1,024 samples it reaches 39.2, 35.7 and 42.0 dB, 2.2, 3.1 and 4.8 dB above `nrc-permuto`. At 256 samples it reaches 35.8, 32.1 and 36.5 dB in 0.64 to 0.99 s; `exact` needs 512 samples and 4.5 to 9.5 s for 36.3, 33.4 and 36.2 dB. Its 32-sample noise is 1.4 to 6.1 times lower in linear luminance than `nrc-permuto`'s, so all of seeds 0 to 7 clear the bar at 20, 16 and 24 samples: 30.3 images per second, 10.3 times stock Blender.
+
+## Moved cameras
+
+![Gate PSNR of exact, nrc-hq and nrc-scatter as the camera moves off the published view](assets/moved_camera.png)
+
+<sub>4,096-spp seed-0 images against an exact 16,384-spp reference of each view, gate PSNR. The camera moves to its right by 1, 3 and 10% of its distance to the focus and turns back so the focus stays centred. The caches are the published ones.</sub>
+
+Every cache is baked from the scene's own camera. Moved off it, `exact` renders the same quality and `nrc-hq` loses up to 4.2 dB at 10%, but `nrc-scatter` falls fast on junkshop and classroom and fails the gate from a 1 to 3% move. In a turn of the camera about its own centre, `nrc-scatter` matches the published view on every ray it saw before and all of the loss is in the strip that enters the frame; in the orbits, most of it is on surfaces the published camera did not see. Its records come only from first hits of the published camera's paths, while `nrc-hq` learns from every path vertex.
+
+| gate PSNR (dB) | published | 1% | 3% | 10% | turn alone |
+|---|---|---|---|---|---|
+| monster, `exact` | 44.46 | 44.46 | 44.46 | 44.48 | 44.67 |
+| monster, `nrc-hq` | 36.08 | 36.07 | 36.01 | 35.69 ✗ | 34.99 ✗ |
+| monster, `nrc-scatter` | 40.75 | 40.67 | 40.03 | 37.37 | 35.43 ✗ |
+| junkshop, `exact` | 41.73 | 41.70 | 41.65 | 41.58 | 41.51 |
+| junkshop, `nrc-hq` | 31.93 | 31.85 | 31.42 | 28.48 ✗ | 28.76 |
+| junkshop, `nrc-scatter` | 36.81 | 33.36 | 25.05 ✗ | 17.97 ✗ | 17.67 ✗ |
+| classroom, `exact` | 44.33 | 44.24 | 44.14 | 44.48 | 44.44 |
+| classroom, `nrc-hq` | 35.55 | 34.99 | 33.56 ✗ | 31.39 ✗ | 33.49 ✗ |
+| classroom, `nrc-scatter` | 45.16 | 35.77 ✗ | 30.02 ✗ | 25.55 ✗ | 33.68 ✗ |
+
+✗: fails the gate, by PSNR under the view's 32-spp bar or by mean luminance off by more than 0.5%. The turn alone is the 10% orbit's 5.7 degrees with the camera's centre fixed. RECIPE.md section 5, Moved cameras, has the bar and images per second at every view, the error split between surfaces seen and not seen from the published camera, and the moves.
 
 ## RTX PRO 6000
 

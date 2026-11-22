@@ -6,6 +6,7 @@
 # The official binary ships no sm_90 cubin; the driver compiles its PTX once (CUDA_CACHE_PATH keeps it).
 # About 2 GPU-hours on one H100 at stock speed; the GPUs given share the renders.
 # The project's reference was rendered with the exact bhotB build, which equals stock up to FP rounding.
+# MOVE="tx,ty,tz,rx,ry,rz" renders it from a moved camera (scripts/move_camera.py).
 set -euo pipefail
 B=${1:?stock blender dir}; OUT=${2:?out dir}; shift 2; GPUS=("${@:-0}")
 HERE=$(cd "$(dirname "$0")/.." && pwd); : "${BENCH:?BENCH = the launcher data dir}"
@@ -18,7 +19,7 @@ done
 run() {  # run <gpu> <scene> <dir> <spp> <seed>
   local blend; blend=$(find "$BENCH/scenes" -path "*/$2/main.blend" | head -1); mkdir -p "$OUT/$3"
   [ -s "$OUT/$3/$2_s$4.exr" ] && return 0
-  CUDA_VISIBLE_DEVICES=$1 "$B/blender" -b --factory-startup -noaudio "$blend" --python "$HERE/scripts/render_check.py" \
+  CUDA_VISIBLE_DEVICES=$1 "$B/blender" -b --factory-startup -noaudio "$blend" --python "$HERE/scripts/move_camera.py" --python "$HERE/scripts/render_check.py" \
     -- "$OUT/$3/$2_s$4.exr" "$4" "$5" 2>&1 | grep render_check
 }
 i=0; pids=(); fail=0

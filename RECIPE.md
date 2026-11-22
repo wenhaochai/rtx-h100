@@ -372,6 +372,66 @@ On junkshop, which clamps no samples, the estimator is unbiased. Its luminance i
 
 The variance is the larger problem. One path in 1/p carries all of the indirect light, and the cache predicts only its mean, so the variance is about 1/p times `exact`'s: 4.5, 8.5 and 17 times on junkshop. At 2.4 to 3.1 times `exact`'s samples per minute, the control variate is worse than `exact` at equal render time for every p, and far worse than `nrc-scatter`.
 
+### Moved cameras: what the caches learned
+
+Every cache is baked from renders of the scene's own camera. To see whether it learned the scene or only that view, each configuration renders the three scenes from cameras moved off the published ones, with the published caches; nothing is baked again. `scripts/move_camera.py` moves the camera (`MOVE="tx,ty,tz,rx,ry,rz"` for `scripts/run.sh` and `scripts/make_reference.sh`): a translation along the camera's own right, up and backward axes, then a rotation about them. The moves are an orbit, a translation to the right by p = 1, 3 and 10% of the camera's distance to its focus, turned back by atan(p) so the focus stays in the middle, and a turn alone, the 10% orbit's 5.71 degrees with the camera's centre fixed. The focus distances are 10.50 (monster, the first hit on the view axis), 8.73 (junkshop, the depth-of-field distance) and 7.96 (classroom, the focus object's depth), so the 10% orbit moves the camera by 1.05, 0.87 and 0.80 scene units.
+
+| scene | 1% orbit | 3% orbit | 10% orbit | turn alone |
+|---|---|---|---|---|
+| monster | `0.105,0,0,0,0.573,0` | `0.315,0,0,0,1.718,0` | `1.050,0,0,0,5.711,0` | `0,0,0,0,5.711,0` |
+| junkshop | `0.087,0,0,0,0.573,0` | `0.262,0,0,0,1.718,0` | `0.873,0,0,0,5.711,0` | `0,0,0,0,5.711,0` |
+| classroom | `0.080,0,0,0,0.573,0` | `0.239,0,0,0,1.718,0` | `0.796,0,0,0,5.711,0` | `0,0,0,0,5.711,0` |
+
+Each moved view has its own reference, one exact 16,384-spp render at seed 100, and its own bar, the mean PSNR of exact 32-spp renders at seeds 0 to 7 against it. The published view is measured the same way against one of the published 16,384-spp renders, so its row is the comparison; its bars, counts and luminance offsets match section 5 (20 / 16 / 24 spp for `nrc-scatter`, worst luminance 6.5, 12.4 and 8.6%). Each configuration renders all five views of a scene in one Blender process with persistent data, so a moved camera reaches Cycles through its camera sync, without a new BVH. A render's time is the wall time of its render call, the light sync of the new seed included, so images per second here run a little above section 5's.
+
+The gate image, 4,096 spp at seed 0, PSNR and mean luminance against the view's reference; ✗ fails the gate (PSNR under the view's bar or luminance off by more than 0.5%):
+
+| scene | configuration | published | 1% orbit | 3% orbit | 10% orbit | turn alone |
+|---|---|---|---|---|---|---|
+| monster | `exact` | 44.46, +0.00% | 44.46, +0.00% | 44.46, +0.00% | 44.48, +0.00% | 44.67, +0.00% |
+| monster | `nrc-hq` | 36.08, -0.14% | 36.07, -0.15% | 36.01, -0.24% | 35.69, -0.66% ✗ | 34.99, -1.15% ✗ |
+| monster | `nrc-scatter` | 40.75, -0.10% | 40.67, -0.10% | 40.03, -0.15% | 37.37, -0.26% | 35.43, -1.65% ✗ |
+| monster | `nrc-scatter`, scrambling 1.0 | 41.04, +0.01% | 40.95, +0.01% | 40.28, -0.04% | 37.53, -0.15% | 35.53, -1.60% ✗ |
+| junkshop | `exact` | 41.73, +0.00% | 41.70, +0.00% | 41.65, +0.00% | 41.58, -0.00% | 41.51, -0.00% |
+| junkshop | `nrc-hq` | 31.93, +0.30% | 31.85, +0.26% | 31.42, +0.11% | 28.48, -0.71% ✗ | 28.76, -0.50% |
+| junkshop | `nrc-scatter` | 36.81, +0.17% | 33.36, -0.05% | 25.05, +0.67% ✗ | 17.97, +2.65% ✗ | 17.67, +5.20% ✗ |
+| junkshop | `nrc-scatter`, scrambling 1.0 | 36.81, -0.01% | 33.36, -0.22% | 25.06, +0.50% ✗ | 17.97, +2.49% ✗ | 17.67, +5.05% ✗ |
+| classroom | `exact` | 44.33, +0.00% | 44.24, +0.00% | 44.14, +0.00% | 44.48, +0.00% | 44.44, +0.00% |
+| classroom | `nrc-hq` | 35.55, -0.10% | 34.99, -0.22% | 33.56, -0.88% ✗ | 31.39, -2.07% ✗ | 33.49, -0.96% ✗ |
+| classroom | `nrc-scatter` | 45.16, -0.10% | 35.77, -0.59% ✗ | 30.02, -0.66% ✗ | 25.55, -3.26% ✗ | 33.68, +0.99% ✗ |
+| classroom | `nrc-scatter`, scrambling 1.0 | 45.12, +0.02% | 35.76, -0.48% | 30.01, -0.56% ✗ | 25.53, -3.16% ✗ | 33.66, +1.11% ✗ |
+
+At the bar over seeds 0 to 7, the fewest samples in steps of 4 and the images per second there; – where no count up to 48 clears it:
+
+| scene | configuration | published | 1% orbit | 3% orbit | 10% orbit | turn alone |
+|---|---|---|---|---|---|---|
+| monster | `exact` | 32, 2.76 | 32, 2.75 | 32, 2.76 | 32, 2.78 | 32, 3.00 |
+| monster | `nrc-hq` | 28, 10.9 | 28, 11.0 | 28, 10.8 | 28, 10.8 | 28, 11.5 |
+| monster | `nrc-scatter` | 20, 13.6 | 20, 13.5 | 20, 13.5 | 20, 13.5 | 24, 12.8 |
+| monster | `nrc-scatter`, scrambling 1.0 | 16, 14.1 | 16, 14.1 | 16, 14.1 | 16, 14.2 | 16, 14.8 |
+| junkshop | `exact` | 32, 1.64 | 32, 1.65 | 32, 1.66 | 32, 1.66 | 32, 1.69 |
+| junkshop | `nrc-hq` | 36, 5.44 | 36, 5.43 | 36, 5.45 | 36, 5.41 | 36, 5.50 |
+| junkshop | `nrc-scatter` | 16, 11.3 | 16, 11.0 | 20, 9.51 | – | – |
+| junkshop | `nrc-scatter`, scrambling 1.0 | 8, 15.0 | 8, 15.1 | 8, 15.0 | – | – |
+| classroom | `exact` | 32, 1.19 | 32, 1.19 | 32, 1.20 | 32, 1.20 | 32, 1.19 |
+| classroom | `nrc-hq` | 28, 6.87 | 28, 6.86 | 28, 6.91 | 40, 5.21 | 28, 6.74 |
+| classroom | `nrc-scatter` | 24, 8.09 | 28, 7.26 | 36, 5.88 | – | 28, 7.20 |
+| classroom | `nrc-scatter`, scrambling 1.0 | 24, 7.55 | 24, 7.62 | 28, 6.93 | – | 24, 7.70 |
+
+`exact` does not care where the camera is. `nrc-hq` holds within 0.5 dB up to the 3% orbit on monster and junkshop and loses 0.4 to 4.2 dB at 10%, where its luminance drifts past the gate's limit on all three scenes. `nrc-scatter` holds on monster, where it still passes the gate at 10%, but on junkshop and classroom it loses 3.4 and 9.4 dB already at the 1% orbit and fails the gate from the 3% and the 1% orbit on; at 10% no count up to 48 reaches the bar on either, and junkshop's converged image, 17.97 dB, is under the 32-spp bar itself. The scrambling distance changes its gate PSNR by at most 0.3 dB. The 32-spp bar, being noisy, hides most of it: where the bar is reached at all, the counts move by at most 12 samples.
+
+Where the error comes from. Three causes are possible: points the published camera never saw (position), points it saw but from another direction (direction), and the cache's global output scale (calibration). The turn alone separates them. It keeps the camera's centre, so every point seen from the published camera is seen again along the same ray, and only the strip that enters the frame is new: 24% of monster's pixels and 12% of junkshop's and classroom's. In the rest of the frame `nrc-scatter`'s gate image is as good as the published view at the same rays, 39.98, 36.94 and 44.94 dB against 40.02, 36.77 and 45.04 dB, and so is `nrc-hq`'s (35.52, 32.14 and 35.36 against 35.55, 32.07 and 35.45 dB), so the calibration has not moved. The new strip holds 73, 99 and 93% of `nrc-scatter`'s error, at 30.6, 8.3 and 24.6 dB, against 33.7, 21.7 and 27.8 dB for `nrc-hq`. For the orbits, each pixel is reprojected into the published view through depth renders of both views: a pixel whose surface the published camera saw is seen before, any other is new.
+
+| scene, move | new pixels | `nrc-scatter`: seen before / same points, published / new | `nrc-hq`: seen before / same points, published / new |
+|---|---|---|---|
+| junkshop, 1% | 3.1% | 36.68 / 36.76 / 20.83 dB, new 55% of the error | 31.90 / 31.90 / 30.51 dB, 4% |
+| junkshop, 3% | 7.5% | 35.85 / 36.66 / 14.17 dB, 92% | 31.79 / 31.79 / 28.44 dB, 15% |
+| junkshop, 10% | 19.4% | 31.67 / 36.36 / 10.99 dB, 97% | 31.07 / 31.47 / 23.90 dB, 56% |
+| monster, 3% | 4.2% | 40.34 / 40.63 / 35.89 dB, 11% | 35.93 / 35.99 / 38.31 dB, 3% |
+| monster, 10% | 12.4% | 38.51 / 40.37 / 33.19 dB, 33% | 35.55 / 35.83 / 36.82 dB, 10% |
+
+So the main cause is position. `nrc-scatter` is wrong on surfaces the published camera did not see, at the frame's new edges and behind the edges of nearer objects, where its PSNR on junkshop is 11 to 21 dB; a small move reveals few such pixels, but they carry most of the error. Its training records are taken only at the first cacheable vertex of camera paths from the published camera, so off those surfaces its hash grid holds nothing it was trained for. `nrc-hq` keeps a record per path vertex, so its records cover much more of the scene, and its new pixels stay at 24 to 31 dB. Direction comes second: on surfaces seen before, the scattered cache, which takes the direction toward the camera as an input, gives up at most 0.8 dB at the 1 and 3% orbits and 1.9 to 4.7 dB at 10%, and `nrc-hq`, queried along sampled bounce directions, at most 0.4 dB. On classroom the reprojection is not clean (it marks 30% of the pixels new at the 1% orbit, and `exact`'s error differs between the two sets), so its split is not given. A cache meant for any camera near the published one would be baked from renders of many such cameras, so that the first hits of the dumps cover the surfaces and directions a moved camera sees; that bake was not run.
+
 ## 6. Reproduce
 
 ```bash
@@ -473,5 +533,6 @@ Summed over the three scenes this is 28.6 images per second for `nrc`, 5.32 for 
 - Sobol caps: the `nrc` cubins keep the Sobol table caps of approxH and approxI, 1024 on monster and 256 on classroom. Their FLIP benefit at seeds 0 and 1 was chance; `nrc` was not measured without them.
 - The gate: the final number depends on the 32-spp gate. Under the FLIP rule used until the last evening, the best official scores were about 23,000; approxN and the fast cache rules were judged only under the later rules.
 - No ablation of `nrc`: which earlier steps still matter under rule c0 is not measured. Under c0 the deep-bounce gains of roulette, SSS walk and bounce limits should largely vanish.
+- Cameras: every cache is baked from the scene's own camera. From a camera moved by 1 to 10% of the focus distance, `nrc-scatter` fails the gate from 1 to 3% on junkshop and classroom, mainly on surfaces the published camera never saw (section 5, Moved cameras); `exact` is unaffected.
 - Per-scene choices can come from scene content instead of the scene's name: on the exact track a rule-based configuration matched the hand-picked one within 0.06%; on the approximate track it was 0.9% slower.
 - Open: kernel variants that drop work rule c0 makes dead, per-scene scrambling 0 or a higher light threshold on the cache arm with new KernelData headers (+3% to +7% per scene in screens), and the smaller emitter-bake gain on the collaborator's classroom.
